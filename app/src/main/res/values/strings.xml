@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">ClickControl</string>
-    <string name="accessibility_service_description">ClickControl accessibility service for routing Zwift Click controller clicks to AnkiDroid and MyWhoosh.</string>
+    <string name="accessibility_service_description">ClickControl accessibility service for controller actions in AnkiDroid, MyWhoosh, and other apps, including configured screen taps and keyboard input.</string>
 </resources>

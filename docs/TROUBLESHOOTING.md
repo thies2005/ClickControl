@@ -8,3 +8,5 @@
 - **Android project missing from Gradle:** configure a valid Android SDK path with a `platforms` directory and install SDK 35; `-PskipAndroid=true` intentionally excludes Android.
 
 See [AUDIT.md](../AUDIT.md) for what was and was not validated. Unit tests and packaged self-tests do not establish live controller, Anki or MyWhoosh interoperability.
+
+For generic screen-click or key actions, verify accessibility on Android, the focused target/editor, and the configured full-screen area. Android keyboard input requires API 33+; Wayland desktop input requires its configured backend and permissions; see [Wayland setup](WAYLAND.md). See [Input actions](INPUT_ACTIONS.md).

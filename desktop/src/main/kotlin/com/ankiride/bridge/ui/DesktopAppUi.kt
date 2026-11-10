@@ -1707,7 +1707,7 @@ fun GestureActionPickerRow(
                         menuExpanded = false
                     }
                 )
-                MappedTargetAction.entries.forEach { target ->
+                MappedTargetAction.entries.filterNot { it == MappedTargetAction.SCREEN_CLICK || it == MappedTargetAction.KEYBOARD_INPUT }.forEach { target ->
                     DropdownMenuItem(
                         text = {
                             Text(

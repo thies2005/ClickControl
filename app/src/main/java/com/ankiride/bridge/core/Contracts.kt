@@ -126,6 +126,8 @@ enum class MappedTargetAction(
     val myWhooshAction: MyWhooshAction? = null
 ) {
     NONE("Disabled (No Action)"),
+    SCREEN_CLICK("Screen click"),
+    KEYBOARD_INPUT("Keyboard input"),
     MW_SHIFT_UP("MyWhoosh: Shift Up (+)", myWhooshAction = MyWhooshAction.SHIFT_UP),
     MW_SHIFT_DOWN("MyWhoosh: Shift Down (–)", myWhooshAction = MyWhooshAction.SHIFT_DOWN),
     ANKI_FLIP_OR_AGAIN("Anki: Didn't Know / Again (1)", ankiAction = AnkiAction.FLIP_OR_AGAIN),
@@ -156,11 +158,32 @@ data class ModeButtonBindingKey(
 enum class AnkiTarget { ANKIDROID, ANKICONNECT }
 
 data class PresetBindingKey(val button: ClickButton, val pressType: PressType)
+enum class PortableKey { A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4, DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8, DIGIT_9, SPACE, ENTER, TAB, ESCAPE, UP, DOWN, LEFT, RIGHT, BACKSPACE, DELETE, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12 }
+data class InputConfig(
+    val left: Float = 0f, val top: Float = 0f, val width: Float = 0f, val height: Float = 0f,
+    val key: PortableKey? = null, val ctrl: Boolean = false, val alt: Boolean = false,
+    val shift: Boolean = false, val meta: Boolean = false,
+    val clickAtPointer: Boolean = false
+) {
+    fun validFor(action: MappedTargetAction): Boolean = when (action) {
+        MappedTargetAction.SCREEN_CLICK -> clickAtPointer || (listOf(left, top, width, height).all { it.isFinite() } && left >= 0f && top >= 0f && width > 0f && height > 0f && left + width <= 1f && top + height <= 1f)
+        MappedTargetAction.KEYBOARD_INPUT -> key != null
+        else -> false
+    }
+    fun label(action: MappedTargetAction): String = when (action) {
+        MappedTargetAction.SCREEN_CLICK -> (if (clickAtPointer) "Click at pointer" else "Screen click (${(left * 100).toInt()}%, ${(top * 100).toInt()}%, ${(width * 100).toInt()}% × ${(height * 100).toInt()}%)")
+        MappedTargetAction.KEYBOARD_INPUT -> listOfNotNull("Ctrl".takeIf { ctrl }, "Alt".takeIf { alt }, "Shift".takeIf { shift }, "Meta".takeIf { meta }, key?.name?.removePrefix("DIGIT_")).joinToString(" + ")
+        else -> action.label
+    }
+}
+interface GenericInputDispatcher { fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean }
+
 data class MappingPreset(
     val id: String,
     val name: String,
     val ankiTarget: AnkiTarget,
-    val bindings: Map<PresetBindingKey, MappedTargetAction>
+    val bindings: Map<PresetBindingKey, MappedTargetAction>,
+    val inputConfigs: Map<PresetBindingKey, InputConfig> = emptyMap()
 )
 
 data class AppConfiguration(

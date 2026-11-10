@@ -188,6 +188,42 @@ fun runHeadlessSelfTest() {
 }
 
 fun main(args: Array<String>) {
+    if (args.contains("--live-input-test")) {
+        // Explicit, opt-in integration hook: key A, pointer, click LEFT TOP WIDTH HEIGHT, or sequence.
+        val i = args.indexOf("--live-input-test")
+        val action = args.getOrNull(i + 1) ?: error("Expected key or click")
+        Thread.sleep(3000) // Allow the operator to focus the target window.
+        when (action) {
+            "key" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
+                com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.valueOf(args[i + 2])))
+            "pointer" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                com.ankiride.bridge.core.InputConfig(clickAtPointer = true))
+            "click" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                com.ankiride.bridge.core.InputConfig(args[i + 2].toFloat(), args[i + 3].toFloat(), args[i + 4].toFloat(), args[i + 5].toFloat()))
+            "sequence" -> {
+                val dispatcher = com.ankiride.bridge.service.DesktopGenericInputDispatcher
+                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
+                    com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.A))
+                Thread.sleep(250)
+                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                    com.ankiride.bridge.core.InputConfig(.19f, .19f, .02f, .02f))
+                Thread.sleep(250)
+                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                    com.ankiride.bridge.core.InputConfig(.79f, .79f, .02f, .02f))
+                Thread.sleep(250)
+                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                    com.ankiride.bridge.core.InputConfig(clickAtPointer = true))
+            }
+            else -> error("Expected key, click, pointer, or sequence")
+        }
+        // Keep an owned virtual device alive until the compositor consumes the final event.
+        Thread.sleep(250)
+        println("LIVE_INPUT_SENT")
+        return
+    }
     if (args.contains("--self-test")) {
         runHeadlessSelfTest()
         return
@@ -214,7 +250,8 @@ fun main(args: Array<String>) {
                 scope = scope,
                 configSupplier = { config },
                 ankiDispatcher = desktopAnkiDispatcher,
-                myWhooshDispatcher = desktopMyWhooshDispatcher
+                myWhooshDispatcher = desktopMyWhooshDispatcher,
+                routingEnabled = { isBridgeRunning }
             )
         }
         val bleController = remember { DesktopZwiftBleController() }
@@ -233,9 +270,12 @@ fun main(args: Array<String>) {
 
         val toggleBridge: () -> Unit = {
             if (isBridgeRunning) {
+                synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) {
+                    isBridgeRunning = false
+                    com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending()
+                }
                 bleController.disconnect()
                 openBikeClient.stopServer()
-                isBridgeRunning = false
                 DiagnosticLogger.info(LogCategory.SYSTEM, "Bridge stopped by user")
             } else {
                 openBikeClient.startServer(config.openBikeServerPort)
@@ -283,7 +323,7 @@ fun main(args: Array<String>) {
                     onClick = {
                         if (presetDirty) { isMainWindowVisible = true; confirmQuit = true }
                         else {
-                            if (isBridgeRunning) { bleController.disconnect(); openBikeClient.stopServer() }
+                            if (isBridgeRunning) { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer() }
                             exitApplication()
                         }
                     }
@@ -297,7 +337,7 @@ fun main(args: Array<String>) {
             onCloseRequest = {
                 if (java.awt.SystemTray.isSupported()) isMainWindowVisible = false
                 else if (presetDirty) confirmQuit = true
-                else { bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }
+                else { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }
             },
             state = mainWindowState,
             visible = isMainWindowVisible,
@@ -338,7 +378,7 @@ fun main(args: Array<String>) {
                         onDismissRequest = { confirmQuit = false },
                         title = { Text("Discard unsaved changes?") },
                         text = { Text("Save your preset before quitting, or discard the changes.") },
-                        confirmButton = { TextButton(onClick = { bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }) { Text("Discard and quit") } },
+                        confirmButton = { TextButton(onClick = { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }) { Text("Discard and quit") } },
                         dismissButton = { TextButton(onClick = { confirmQuit = false }) { Text("Keep editing") } }
                     )
                 }

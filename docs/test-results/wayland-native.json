@@ -1,0 +1,43 @@
+{
+  "result": "PASS",
+  "backend": "GdkWaylandDisplay",
+  "logical_display": [
+    1536,
+    960
+  ],
+  "key": "A",
+  "clicks": [
+    {
+      "expected": [
+        307,
+        191
+      ],
+      "actual": [
+        307.1015625,
+        191.1015625
+      ]
+    },
+    {
+      "expected": [
+        1228,
+        767
+      ],
+      "actual": [
+        1227.66796875,
+        766.640625
+      ]
+    },
+    {
+      "expected": [
+        1228,
+        767
+      ],
+      "actual": [
+        1227.66796875,
+        766.640625
+      ]
+    }
+  ],
+  "private_daemon": true,
+  "repeat_mode": false
+}

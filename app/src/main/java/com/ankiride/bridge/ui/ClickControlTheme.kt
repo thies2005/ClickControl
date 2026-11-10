@@ -11,6 +11,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.ankiride.bridge.core.*
+import com.ankiride.bridge.service.AndroidGenericInputDispatcher
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 val ClickControlColors = darkColorScheme(
     primary = Color(0xFF70D8C8), onPrimary = Color(0xFF062B28),
@@ -42,8 +46,17 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
     LaunchedEffect(dirty) { onDirtyChanged(dirty) }
     var managementOpen by remember { mutableStateOf(false) }
     var rightPod by remember { mutableStateOf(true) }
+    val testScope = rememberCoroutineScope()
+    val testDispatcher = remember { AndroidGenericInputDispatcher }
+    var editorRevision by remember { mutableIntStateOf(0) }
+    var testJob by remember { mutableStateOf<Job?>(null) }
+    var countdown by remember { mutableIntStateOf(0) }
     var selectedButton by remember { mutableStateOf(ClickButton.Y) }
     var buttonMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(current.id, selectedButton, draft.bindings, draft.inputConfigs) {
+        testJob?.cancel(); countdown = 0
+    }
+    DisposableEffect(Unit) { onDispose { testJob?.cancel() } }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
         Text("Presets", style = MaterialTheme.typography.headlineSmall)
         Box {
@@ -66,7 +79,7 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
         } else Text("Destination: local Anki", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(if (dirty) "Unsaved changes" else "Saved", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { if (draft.name.isNotBlank()) onChange(config.copy(presets = config.presets.map { if (it.id == current.id) draft.copy(name = draft.name.trim()) else it })) }, enabled = dirty && draft.name.isNotBlank(), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Save") }
+            Button(onClick = { if (draft.name.isNotBlank()) onChange(config.copy(presets = config.presets.map { if (it.id == current.id) draft.copy(name = draft.name.trim()) else it })) }, enabled = dirty && draft.name.isNotBlank() && draft.bindings.all { (key, action) -> action !in listOf(MappedTargetAction.SCREEN_CLICK, MappedTargetAction.KEYBOARD_INPUT) || draft.inputConfigs[key]?.validFor(action) == true }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Save") }
             Box {
                 OutlinedButton(onClick = { managementOpen = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Manage ▾") }
                 DropdownMenu(expanded = managementOpen, onDismissRequest = { managementOpen = false }) {
@@ -82,9 +95,9 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
                         val duplicate = draft.copy(id = PresetStore.newId(), name = "${draft.name} copy")
                         onChange(config.copy(presets = config.presets + duplicate, activePresetId = duplicate.id)); managementOpen = false
                     })
-                    DropdownMenuItem(text = { Text("Reset to standard") }, onClick = { draft = draft.copy(bindings = PresetStore.standardBindings()); managementOpen = false })
-                    DropdownMenuItem(text = { Text("Clear all actions") }, onClick = { draft = draft.copy(bindings = current.bindings.mapValues { MappedTargetAction.NONE }); managementOpen = false })
-                    DropdownMenuItem(text = { Text("Discard changes") }, enabled = dirty, onClick = { draft = current; managementOpen = false })
+                    DropdownMenuItem(text = { Text("Reset to standard") }, onClick = { draft = draft.copy(bindings = PresetStore.standardBindings(), inputConfigs = emptyMap()); managementOpen = false })
+                    DropdownMenuItem(text = { Text("Clear all actions") }, onClick = { draft = draft.copy(bindings = current.bindings.mapValues { MappedTargetAction.NONE }, inputConfigs = emptyMap()); managementOpen = false })
+                    DropdownMenuItem(text = { Text("Discard changes") }, enabled = dirty, onClick = { draft = current; editorRevision++; managementOpen = false })
                     DropdownMenuItem(text = { Text("Delete preset") }, enabled = config.presets.size > 1, onClick = { confirmDelete = true; managementOpen = false })
                 }
             }
@@ -107,13 +120,55 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
             val key = PresetBindingKey(selectedButton, press)
             Box {
                 OutlinedButton(onClick = { actionMenu = key }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("${if (press == PressType.SINGLE_CLICK) "Press" else "Hold"}: ${(draft.bindings[key] ?: MappedTargetAction.NONE).label}")
+                    Text("${if (press == PressType.SINGLE_CLICK) "Press" else "Hold"}: ${PresetStore.bindingLabel(draft, key)}")
                 }
                 DropdownMenu(expanded = actionMenu == key, onDismissRequest = { actionMenu = null }, modifier = Modifier.heightIn(max = 400.dp)) {
                     MappedTargetAction.entries.forEach { action -> DropdownMenuItem(text = { Text(action.label) }, onClick = {
-                        draft = draft.copy(bindings = draft.bindings + (key to action)); actionMenu = null
+                        val defaults = when (action) {
+                            MappedTargetAction.SCREEN_CLICK -> InputConfig(left = .4f, top = .4f, width = .2f, height = .2f)
+                            MappedTargetAction.KEYBOARD_INPUT -> InputConfig(key = PortableKey.ENTER)
+                            else -> null
+                        }
+                        draft = draft.copy(bindings = draft.bindings + (key to action), inputConfigs = if (defaults == null) draft.inputConfigs - key else draft.inputConfigs + (key to defaults)); actionMenu = null
                     }) }
                 }
+            }
+            val action = draft.bindings[key] ?: MappedTargetAction.NONE
+            if (action == MappedTargetAction.SCREEN_CLICK || action == MappedTargetAction.KEYBOARD_INPUT) {
+                val payload = draft.inputConfigs[key] ?: InputConfig()
+                fun update(c: InputConfig) { draft = draft.copy(inputConfigs = draft.inputConfigs + (key to c)) }
+                if (action == MappedTargetAction.SCREEN_CLICK) {
+                    Text("Screen area on the full primary display, in percent. Clicks its center.", style = MaterialTheme.typography.bodySmall)
+                    listOf("Left" to payload.left, "Top" to payload.top, "Width" to payload.width, "Height" to payload.height).forEachIndexed { index, (label, value) ->
+                        var text by rememberSaveable(current.id, current, key, action, index, editorRevision) { mutableStateOf(if (value.isFinite()) (value * 100).toString() else "") }
+                        OutlinedTextField(text, { raw ->
+                            text = raw
+                            val number = raw.toFloatOrNull()?.div(100f) ?: Float.NaN
+                            update(when (index) { 0 -> payload.copy(left = number); 1 -> payload.copy(top = number); 2 -> payload.copy(width = number); else -> payload.copy(height = number) })
+                        }, label = { Text("$label (%)") }, singleLine = true, isError = !payload.validFor(action), modifier = Modifier.fillMaxWidth())
+                    }
+                    if (!payload.validFor(action)) Text("Enter a positive area within 0–100%.", color = MaterialTheme.colorScheme.error)
+                } else {
+                    Text("Keyboard input requires Android 13 or later and a focused text editor.", style = MaterialTheme.typography.bodySmall)
+                    var keyMenu by remember { mutableStateOf(false) }
+                    Box {
+                        OutlinedButton(onClick = { keyMenu = true }) { Text("Key: ${payload.key?.name ?: "Select"} ▾") }
+                        DropdownMenu(expanded = keyMenu, onDismissRequest = { keyMenu = false }, modifier = Modifier.heightIn(max = 400.dp)) {
+                            PortableKey.entries.forEach { portableKey -> DropdownMenuItem(text = { Text(portableKey.name) }, onClick = { update(payload.copy(key = portableKey)); keyMenu = false }) }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("Ctrl" to payload.ctrl, "Alt" to payload.alt, "Shift" to payload.shift, "Meta" to payload.meta).forEachIndexed { index, (label, selected) ->
+                            FilterChip(selected = selected, onClick = { update(when (index) { 0 -> payload.copy(ctrl = !selected); 1 -> payload.copy(alt = !selected); 2 -> payload.copy(shift = !selected); else -> payload.copy(meta = !selected) }) }, label = { Text(label) })
+                        }
+                    }
+                }
+                OutlinedButton(onClick = {
+                    if (countdown > 0) { testJob?.cancel(); countdown = 0 }
+                    else testJob = testScope.launch {
+                        try { for (i in 3 downTo 1) { countdown = i; delay(1000) }; testDispatcher.dispatch(action, payload) } finally { countdown = 0 }
+                    }
+                }, enabled = payload.validFor(action)) { Text(if (countdown > 0) "Cancel test ($countdown)" else "Test in 3 seconds") }
             }
         }
     }
@@ -129,8 +184,8 @@ fun MappingOverview(config: AppConfiguration) {
         ClickButton.entries.map { it.canonicalButton }.distinct().filter { it.isPrimaryConfigurable || it == ClickButton.SHIFT_UP_LEFT || it == ClickButton.SHIFT_DOWN_RIGHT }.forEach { button ->
             Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) {
                 Text(button.displayName, style = MaterialTheme.typography.titleSmall)
-                Text("Press: ${(preset.bindings[PresetBindingKey(button, PressType.SINGLE_CLICK)] ?: MappedTargetAction.NONE).label}")
-                Text("Hold: ${(preset.bindings[PresetBindingKey(button, PressType.LONG_PRESS)] ?: MappedTargetAction.NONE).label}")
+                Text("Press: ${PresetStore.bindingLabel(preset, PresetBindingKey(button, PressType.SINGLE_CLICK))}")
+                Text("Hold: ${PresetStore.bindingLabel(preset, PresetBindingKey(button, PressType.LONG_PRESS))}")
             } }
         }
     }

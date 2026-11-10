@@ -159,15 +159,16 @@ class BridgeForegroundService : Service() {
             configSupplier = { currentConfig },
             serviceProvider = { BridgeAccessibilityService.activeInstance }
         )
+        val ble = ZwiftBleController(this, serviceScope)
         val router = ActionRouter(
             context = this,
             scope = serviceScope,
             configSupplier = { currentConfig },
             ankiDispatcher = anki,
-            myWhooshDispatcher = whoosh
+            myWhooshDispatcher = whoosh,
+            routingEnabled = { _isRunningFlow.value && bleController === ble }
         )
 
-        val ble = ZwiftBleController(this, serviceScope)
         bleController = ble
         myWhooshDispatcher = whoosh
         ankiDispatcher = anki
@@ -189,6 +190,10 @@ class BridgeForegroundService : Service() {
     }
 
     private fun stopBridge() {
+        synchronized(AndroidGenericInputDispatcher.routingLock) {
+            _isRunningFlow.value = false
+            AndroidGenericInputDispatcher.cancelPending()
+        }
         bleController?.disconnect()
         openBikeServer?.stopServer()
 
@@ -199,7 +204,6 @@ class BridgeForegroundService : Service() {
         ankiDispatcher = null
         actionRouter = null
 
-        _isRunningFlow.value = false
         _connectionStateFlow.value = BleConnectionState.DISCONNECTED
     }
 

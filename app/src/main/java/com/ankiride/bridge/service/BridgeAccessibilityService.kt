@@ -24,6 +24,9 @@ class BridgeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, "BridgeAccessibilityService connected")
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            serviceInfo = serviceInfo.apply { flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR }
+        }
         activeInstance = this
         _isConnectedFlow.value = true
         DiagnosticLogger.info(LogCategory.PERMS, "BridgeAccessibilityService connected and active")

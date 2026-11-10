@@ -17,3 +17,7 @@ Run Anki with AnkiConnect for desktop or laptop review. Use `127.0.0.1` and port
 ## MyWhoosh
 
 ClickControl advertises an OpenBikeControl TCP service as `_openbikecontrol._tcp` on port `21587`; the cycling app must support and connect to it. Android also offers a configured accessibility touch fallback. Desktop keyboard/mouse fallback depends on focus and desktop-session input support; background control is better served by OpenBikeControl. Actual interoperability and firmware behavior still require physical testing; see [Troubleshooting](TROUBLESHOOTING.md).
+
+## Other applications
+
+Use Screen click or Keyboard input actions in the preset editor to control other apps on the device running ClickControl. Configure the target area or key combination separately for Press and Hold. See [Input actions](INPUT_ACTIONS.md) for setup, testing and platform limits.

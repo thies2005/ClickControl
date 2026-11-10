@@ -172,7 +172,7 @@ fun AnkiRideDashboard(
     var showMappings by remember { mutableStateOf(false) }
     val discovered by ZwiftBleController.discoveredAddresses.collectAsState()
     val activePreset = PresetStore.active(config)
-    val accessibilityRequired = activePreset?.ankiTarget == AnkiTarget.ANKIDROID ||
+    val accessibilityRequired = activePreset?.bindings?.values?.any { it == MappedTargetAction.SCREEN_CLICK || it == MappedTargetAction.KEYBOARD_INPUT } == true || activePreset?.ankiTarget == AnkiTarget.ANKIDROID ||
         (config.useMyShiftTouchFallbackWhenNoClient && activePreset?.bindings?.values?.any { it.myWhooshAction != null } == true)
     var a11yEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var batteryExempt by remember { mutableStateOf(isBatteryOptimizationExempt(context)) }
@@ -751,7 +751,7 @@ fun GestureActionPickerRow(
                         menuExpanded = false
                     }
                 )
-                MappedTargetAction.entries.forEach { target ->
+                MappedTargetAction.entries.filterNot { it == MappedTargetAction.SCREEN_CLICK || it == MappedTargetAction.KEYBOARD_INPUT }.forEach { target ->
                     DropdownMenuItem(
                         text = { Text(target.label) },
                         onClick = {
