@@ -43,8 +43,16 @@ class WaylandInputTest {
         assertEquals(0, runner.starts)
     }
     @Test fun commandTimeoutIsBounded() {
+        val isWindows = System.getProperty("os.name").lowercase().contains("windows")
+        val command = if (isWindows) {
+            listOf("powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 5")
+        } else if (java.io.File("/bin/sleep").exists()) {
+            listOf("/bin/sleep", "5")
+        } else {
+            listOf("sleep", "5")
+        }
         val start = System.nanoTime()
-        try { SystemInputCommandRunner.run(listOf("/bin/sleep", "5"), timeoutMs = 50); fail("expected timeout") }
+        try { SystemInputCommandRunner.run(command, timeoutMs = 50); fail("expected timeout") }
         catch (e: IllegalStateException) { assertTrue(e.message!!.contains("timed out")) }
         assertTrue(java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start) < 4)
     }
