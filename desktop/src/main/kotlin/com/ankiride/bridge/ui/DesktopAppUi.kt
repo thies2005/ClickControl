@@ -128,10 +128,20 @@ fun DesktopAppUi(
                         else -> {
                             Text("Settings", style = MaterialTheme.typography.headlineSmall)
                             Text("Controller connection", style = MaterialTheme.typography.titleMedium)
-                            listOf(false to "Right controller only", true to "Both controllers").forEach { (both, label) ->
-                                val selected = if (both) (config.podAssignment == PodAssignment.RIGHT_ANKI_LEFT_BIKE || config.podAssignment == PodAssignment.LEGACY_SHARED && !config.rightPodOnlyNoZwift) else (config.podAssignment == PodAssignment.RIGHT_ANKI_ONLY || config.podAssignment == PodAssignment.LEGACY_SHARED && config.rightPodOnlyNoZwift)
+                            listOf(
+                                Triple(PodAssignment.RIGHT_ANKI_ONLY, true, "Right controller only"),
+                                Triple(PodAssignment.RIGHT_ANKI_LEFT_BIKE, false, "Both controllers"),
+                                Triple(PodAssignment.LEGACY_SHARED, false, "Shared / single link (auto-connect any)")
+                            ).forEach { (assignment, rightOnly, label) ->
+                                val selected = config.podAssignment == assignment
                                 Row(Modifier.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    RadioButton(selected = selected, onClick = { if (!selected) onConfigChange(config.copy(podAssignment = if (both) PodAssignment.RIGHT_ANKI_LEFT_BIKE else PodAssignment.RIGHT_ANKI_ONLY, rightPodOnlyNoZwift = !both)) }); Text(label)
+                                    RadioButton(
+                                        selected = selected,
+                                        onClick = {
+                                            if (!selected) onConfigChange(config.copy(podAssignment = assignment, rightPodOnlyNoZwift = rightOnly))
+                                        }
+                                    )
+                                    Text(label)
                                 }
                             }
                             OutlinedTextField(config.ubuntuAnkiConnectHost, { onConfigChange(config.copy(ubuntuAnkiConnectHost = it)) }, label = { Text("AnkiConnect host") }, singleLine = true, modifier = Modifier.fillMaxWidth())

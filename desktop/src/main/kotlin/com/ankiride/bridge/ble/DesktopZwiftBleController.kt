@@ -41,6 +41,9 @@ class DesktopZwiftBleController(
     private val _connectedLeftMac = MutableStateFlow<String?>(null)
     val connectedLeftMac: StateFlow<String?> = _connectedLeftMac.asStateFlow()
 
+    private val _discoveredAddresses = MutableStateFlow<List<String>>(emptyList())
+    val discoveredAddresses: StateFlow<List<String>> = _discoveredAddresses.asStateFlow()
+
     val podActiveMasks = ConcurrentHashMap<String, Int>()
     private val lastLoggedPayloadHex = ConcurrentHashMap<String, String>()
 
@@ -265,6 +268,12 @@ class DesktopZwiftBleController(
                 when (stateName) {
                     "SCANNING" -> {
                         if (_connectedRightMac.value == null && _connectedLeftMac.value == null) _connectionState.value = BleConnectionState.SCANNING
+                    }
+                    "DISCOVERED" -> {
+                        if (mac != null && !_discoveredAddresses.value.contains(mac)) {
+                            _discoveredAddresses.value = (_discoveredAddresses.value + mac).takeLast(20)
+                            DiagnosticLogger.info(LogCategory.BLE, "Discovered Zwift controller: $mac")
+                        }
                     }
                     "CONNECTING" -> {
                         _connectionState.value = BleConnectionState.CONNECTING
@@ -532,6 +541,16 @@ class DesktopZwiftBleController(
         // 2. File(System.getProperty("user.home"), ".ankiride/bin")
         val homeBinCandidate = File(File(System.getProperty("user.home"), ".ankiride/bin"), binaryName)
         if (homeBinCandidate.exists() && homeBinCandidate.isFile) {
+            if (composeResDir.isNullOrBlank()) {
+                val devScripts = listOf(
+                    File("desktop/src/main/resources/ble/zwift_ble_worker.py"),
+                    File("src/main/resources/ble/zwift_ble_worker.py")
+                )
+                if (devScripts.any { it.exists() && it.isFile && it.lastModified() > homeBinCandidate.lastModified() }) {
+                    DiagnosticLogger.info(LogCategory.BLE, "Dev Python worker script is newer than ~/.ankiride/bin binary, bypassing cached binary")
+                    return null
+                }
+            }
             if (!homeBinCandidate.canExecute()) {
                 runCatching { homeBinCandidate.setExecutable(true, true) }
             }
@@ -553,7 +572,8 @@ class DesktopZwiftBleController(
                 Files.setPosixFilePermissions(binDir.toPath(), PosixFilePermissions.fromString("rwx------"))
             }
             val stagedFile = File(binDir, binaryName)
-            if (!stagedFile.exists() || stagedFile.length() != sourceFile.length() || stagedFile.lastModified() < sourceFile.lastModified()) {
+            val shouldOverwrite = !stagedFile.exists() || (sourceFile.lastModified() >= stagedFile.lastModified() && (stagedFile.length() != sourceFile.length() || stagedFile.lastModified() < sourceFile.lastModified()))
+            if (shouldOverwrite) {
                 sourceFile.copyTo(stagedFile, overwrite = true)
             }
             stagedFile.setExecutable(true, true)

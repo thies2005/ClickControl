@@ -226,6 +226,9 @@ class DesktopZwiftBleControllerTest {
         parse("STATE SCANNING")
         assertEquals(BleConnectionState.SCANNING, controller.connectionState.value)
 
+        parse("STATE DISCOVERED F4:C4:59:0C:6F:29")
+        assertTrue(controller.discoveredAddresses.value.contains("F4:C4:59:0C:6F:29"))
+
         parse("STATE CONNECTING")
         assertEquals(BleConnectionState.CONNECTING, controller.connectionState.value)
 
@@ -328,6 +331,11 @@ class DesktopZwiftBleControllerTest {
         val binaryName = if (isWindows) "zwift_ble_worker.exe" else "zwift_ble_worker"
         val nonExecResource = File(tempResDir, binaryName)
         val stagedHomeFile = File(File(System.getProperty("user.home"), ".ankiride/bin"), binaryName)
+        val backupFile = if (stagedHomeFile.exists()) {
+            File.createTempFile("zwift_ble_worker_backup", ".bin").also {
+                stagedHomeFile.copyTo(it, overwrite = true)
+            }
+        } else null
         val prevProp = System.getProperty("compose.application.resources.dir")
         try {
             nonExecResource.writeText("#!/bin/sh\necho OK\n")
@@ -343,7 +351,13 @@ class DesktopZwiftBleControllerTest {
             } else {
                 System.clearProperty("compose.application.resources.dir")
             }
-            stagedHomeFile.delete()
+            if (backupFile != null && backupFile.exists()) {
+                backupFile.copyTo(stagedHomeFile, overwrite = true)
+                stagedHomeFile.setExecutable(true, true)
+                backupFile.delete()
+            } else {
+                stagedHomeFile.delete()
+            }
             nonExecResource.delete()
             tempResDir.delete()
         }

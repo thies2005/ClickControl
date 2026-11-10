@@ -31,5 +31,13 @@ class SideTest(unittest.TestCase):
         self.assertEqual('RIGHT', worker.ZwiftBleWorker(pinned_right='AA').side_for('AA', adv(9)))
         self.assertIsNone(worker.ZwiftBleWorker(pinned_right='AA', pinned_left='AA').side_for('AA', adv(7)))
 
+    def test_play_controllers(self):
+        adv = lambda n: types.SimpleNamespace(manufacturer_data={worker.ZWIFT_MANUFACTURER_ID: bytes([n])})
+        w = worker.ZwiftBleWorker()
+        self.assertEqual('RIGHT', w.side_for('AA', adv(worker.DEVICE_ID_PLAY_RIGHT)))
+        self.assertEqual('LEFT', w.side_for('AA', adv(worker.DEVICE_ID_PLAY_LEFT)))
+        self.assertTrue(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_LEFT)))
+        self.assertFalse(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_RIGHT)))
+
 if __name__ == '__main__':
     unittest.main()

@@ -22,6 +22,8 @@ COMMAND_RESPONSE_CHAR_UUID = "00000004-19ca-4651-86e5-fa29dcdd09d1"
 ZWIFT_MANUFACTURER_ID = 0x094A  # 2378 decimal
 RIDE_ON_HANDSHAKE = b"RideOn"   # 526964654F6E
 
+DEVICE_ID_PLAY_RIGHT = 0x02
+DEVICE_ID_PLAY_LEFT = 0x03
 DEVICE_ID_RIGHT_POD = 0x07
 DEVICE_ID_LEFT_POD = 0x08
 DEVICE_ID_CLICK = 0x09
@@ -94,7 +96,7 @@ def is_zwift_device(device, adv_data) -> bool:
 def is_left_pod(adv_data) -> bool:
     if adv_data.manufacturer_data and ZWIFT_MANUFACTURER_ID in adv_data.manufacturer_data:
         data = adv_data.manufacturer_data[ZWIFT_MANUFACTURER_ID]
-        if len(data) > 0 and data[0] == DEVICE_ID_LEFT_POD:
+        if len(data) > 0 and data[0] in (DEVICE_ID_LEFT_POD, DEVICE_ID_PLAY_LEFT):
             return True
     return False
 
@@ -161,48 +163,47 @@ async def setup_and_handshake(client: BleakClient, mac: str) -> bool:
         log("ERROR", f"Required Zwift characteristics missing on {mac}")
         return False
 
-    # Subscribe to measurement_char
-    if measurement_char:
-        try:
-            await client.start_notify(measurement_char, notification_handler)
-            log("INFO", f"Subscribed to measurement notifications ({measurement_char.uuid}) on {mac}")
-        except Exception as ne:
-            log("ERROR", f"Failed to subscribe to measurement char on {mac}: {ne}")
-            return False
-    else:
-        log("WARN", f"Measurement characteristic not found on {mac}")
+    # Subscribe to measurement_char first
+    try:
+        await client.start_notify(measurement_char, notification_handler)
+        log("INFO", f"Subscribed to measurement notifications ({measurement_char.uuid}) on {mac}")
+    except Exception as ne:
+        log("ERROR", f"Failed to subscribe to measurement char on {mac}: {ne}")
+        return False
 
-    # Also check if any additional notify characteristics exist on the Zwift service and subscribe to them
+    # Next, write "RideOn" (0x526964654F6E) to control point characteristic
+    props = [p.lower() for p in control_point_char.properties]
+    initial_response = "write" in props or "write-without-response" not in props
+    try:
+        await client.write_gatt_char(control_point_char, RIDE_ON_HANDSHAKE, response=initial_response)
+        log("INFO", f"RideOn handshake write succeeded (response={initial_response}) on {mac}")
+    except Exception as we:
+        fallback_response = not initial_response
+        log("WARN", f"RideOn write with response={initial_response} failed ({we}), retrying with response={fallback_response}...")
+        try:
+            await client.write_gatt_char(control_point_char, RIDE_ON_HANDSHAKE, response=fallback_response)
+            log("INFO", f"RideOn handshake fallback succeeded (response={fallback_response}) on {mac}")
+        except Exception as we2:
+            log("ERROR", f"RideOn handshake failed on {mac}: {we2}")
+            return False
+
+    # After the "RideOn" handshake succeeds, subscribe to any additional notify characteristics
+    # in zwift_services EXCEPT COMMAND_RESPONSE_CHAR_UUID (00000004-...) and measurement_char
+    # (only "notify" in props, do NOT call start_notify on "indicate"-only COMMAND_RESPONSE_CHAR_UUID)
     for service in zwift_services:
         for char in service.characteristics:
-            if measurement_char and char.uuid.lower() == measurement_char.uuid.lower():
+            c_uuid = char.uuid.lower()
+            if measurement_char and c_uuid == measurement_char.uuid.lower():
+                continue
+            if c_uuid == COMMAND_RESPONSE_CHAR_UUID.lower() or "00000004-19ca-4651-86e5-fa29dcdd09d1" in c_uuid:
                 continue
             props = [p.lower() for p in char.properties]
-            if "notify" in props or "indicate" in props:
+            if "notify" in props:
                 try:
                     await client.start_notify(char, notification_handler)
                     log("INFO", f"Subscribed to additional notify characteristic {char.uuid} on {mac}")
                 except Exception as ne:
                     log("WARN", f"Failed to subscribe to additional notify char {char.uuid} on {mac}: {ne}")
-
-    # Write "RideOn" (0x526964654F6E) to control point characteristic
-    if control_point_char:
-        props = [p.lower() for p in control_point_char.properties]
-        initial_response = "write-without-response" not in props
-        try:
-            await client.write_gatt_char(control_point_char, RIDE_ON_HANDSHAKE, response=initial_response)
-            log("INFO", f"RideOn handshake write succeeded (response={initial_response}) on {mac}")
-        except Exception as we:
-            fallback_response = not initial_response
-            log("WARN", f"RideOn write with response={initial_response} failed ({we}), retrying with response={fallback_response}...")
-            try:
-                await client.write_gatt_char(control_point_char, RIDE_ON_HANDSHAKE, response=fallback_response)
-                log("INFO", f"RideOn handshake fallback succeeded (response={fallback_response}) on {mac}")
-            except Exception as we2:
-                log("ERROR", f"RideOn handshake failed on {mac}: {we2}")
-                return False
-    else:
-        log("WARN", f"No control point characteristic found on {mac} for RideOn handshake")
 
     return True
 
@@ -213,6 +214,7 @@ class ZwiftBleWorker:
         self.pinned_left = pinned_left.strip().upper() if pinned_left else ""
         self.right_only = right_only
         self.legacy_shared = legacy_shared
+        self.discovered_macs = set()
         self.reported_unknown = set()
         self.running = True
         self.active_clients = {}  # mac -> BleakClient
@@ -235,9 +237,9 @@ class ZwiftBleWorker:
         if mac == self.pinned_left:
             return "LEFT"
         data = (adv_data.manufacturer_data or {}).get(ZWIFT_MANUFACTURER_ID, b"")
-        if data and data[0] == DEVICE_ID_LEFT_POD:
+        if data and data[0] in (DEVICE_ID_LEFT_POD, DEVICE_ID_PLAY_LEFT):
             return "LEFT" if not self.pinned_left else None
-        if data and data[0] == DEVICE_ID_RIGHT_POD:
+        if data and data[0] in (DEVICE_ID_RIGHT_POD, DEVICE_ID_PLAY_RIGHT):
             return "RIGHT" if not self.pinned_right else None
         return None
 
@@ -265,10 +267,15 @@ class ZwiftBleWorker:
 
                 found_device = None
                 found_adv = None
+                found_side = None
+                fallback_device = None
+                fallback_adv = None
+                fallback_first_seen = None
                 found_event = asyncio.Event()
 
                 def detection_callback(device, adv_data):
-                    nonlocal found_device, found_adv
+                    nonlocal found_device, found_adv, found_side
+                    nonlocal fallback_device, fallback_adv, fallback_first_seen
                     if not self.running or found_event.is_set():
                         return
                     mac_upper = device.address.upper()
@@ -277,19 +284,43 @@ class ZwiftBleWorker:
                     if not is_zwift_device(device, adv_data):
                         return
 
+                    if mac_upper not in self.discovered_macs:
+                        self.discovered_macs.add(mac_upper)
+                        emit_state("DISCOVERED", mac_upper)
+
                     side = self.side_for(mac_upper, adv_data)
-                    if side is None or side in self.connected_sides.values():
-                        if side is None and not self.legacy_shared and mac_upper not in self.reported_unknown:
-                            self.reported_unknown.add(mac_upper)
-                            log("INFO", f"Unassigned Zwift device {mac_upper}; pin its address to a side in Hardware settings if needed")
-                        return
-                    if self.right_only and side == "LEFT":
-                        log("INFO", f"Skipping left pod {mac_upper} because right_only=true")
+                    if side is not None:
+                        if side in self.connected_sides.values():
+                            return
+                        if self.right_only and side == "LEFT":
+                            log("INFO", f"Skipping left pod {mac_upper} because right_only=true")
+                            return
+                        found_device = device
+                        found_adv = adv_data
+                        found_side = side
+                        found_event.set()
                         return
 
-                    found_device = device
-                    found_adv = adv_data
-                    found_event.set()
+                    # side is None
+                    fallback_side = None
+                    if "RIGHT" not in self.connected_sides.values() and not self.pinned_right and mac_upper != self.pinned_left:
+                        fallback_side = "RIGHT"
+                    elif not self.right_only and "LEFT" not in self.connected_sides.values() and not self.pinned_left and mac_upper != self.pinned_right:
+                        fallback_side = "LEFT"
+
+                    if fallback_side is not None:
+                        fallback_device = device
+                        fallback_adv = adv_data
+                        if fallback_first_seen is None:
+                            fallback_first_seen = time.monotonic()
+                        if time.monotonic() - fallback_first_seen >= 0.6:
+                            found_device = device
+                            found_adv = adv_data
+                            found_side = fallback_side
+                            found_event.set()
+                    elif not self.legacy_shared and mac_upper not in self.reported_unknown:
+                        self.reported_unknown.add(mac_upper)
+                        log("INFO", f"Unassigned Zwift device {mac_upper}; pin its address to a side in Hardware settings if needed")
 
                 # Explicit BleakScanner with detection callback
                 scanner = BleakScanner(detection_callback=detection_callback)
@@ -300,18 +331,32 @@ class ZwiftBleWorker:
                     except asyncio.TimeoutError:
                         pass
                 finally:
-                    # ALWAYS call scanner.stop() completely followed by 150ms settle delay
+                    # ALWAYS call scanner.stop() completely followed by 250ms settle delay
                     try:
                         await scanner.stop()
                     except Exception as se:
                         log("WARN", f"Scanner stop exception: {se}")
 
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.25)
+
+                if found_device is None and fallback_device is not None and self.running:
+                    mac_upper = fallback_device.address.upper()
+                    fallback_side = None
+                    if "RIGHT" not in self.connected_sides.values() and not self.pinned_right and mac_upper != self.pinned_left:
+                        fallback_side = "RIGHT"
+                    elif not self.right_only and "LEFT" not in self.connected_sides.values() and not self.pinned_left and mac_upper != self.pinned_right:
+                        fallback_side = "LEFT"
+
+                    if fallback_side is not None:
+                        found_device = fallback_device
+                        found_adv = fallback_adv
+                        found_side = fallback_side
 
                 if found_device is not None and self.running:
                     mac_upper = found_device.address.upper()
-                    side = self.side_for(mac_upper, found_adv)
-                    await self.connect_device(found_device, mac_upper, side)
+                    target_side = found_side or self.side_for(mac_upper, found_adv)
+                    if target_side:
+                        await self.connect_device(found_device, mac_upper, target_side)
 
                 await asyncio.sleep(0.5)
 
@@ -340,7 +385,17 @@ class ZwiftBleWorker:
 
         try:
             client = BleakClient(device, disconnected_callback=on_disconnect, timeout=10.0)
-            connected = await client.connect(timeout=10.0)
+            connected = False
+            for attempt in range(1, 3):
+                try:
+                    connected = await client.connect(timeout=10.0)
+                    if connected or client.is_connected:
+                        break
+                except Exception as ce:
+                    log("WARN", f"Connection attempt {attempt} to {mac} failed: {ce}")
+                if attempt < 2:
+                    await asyncio.sleep(0.4)
+
             if not connected and not client.is_connected:
                 log("WARN", f"Failed to connect to {mac}")
                 emit_state("DISCONNECTED", mac)
