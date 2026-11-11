@@ -44,7 +44,7 @@ From root: `./gradlew :app:testDebugUnitTest :app:lintDebug` for Android; `./gra
 
 Preserve signing identity, immutable stable tags and published assets. A stable release requires an explicit request; ordinary pushes authorize no stable release. Follow the repository release guide for source versions, default-branch ancestry, checks, notes and publication; monitor workflows and verify downloads before claiming success. Do not clean up releases without explicit scoped authorization. APK/AAB or metadata alone does not imply Play or F-Droid publication.
 
-Default-branch pushes update the signed Android `development` prerelease. The desktop workflow produces Actions artifacts; do not add automatic desktop release publishing. Release signing requires the dedicated key, never a debug fallback.
+Default-branch pushes update the signed Android `development` prerelease and publish automatic desktop alpha pre-releases via the separate desktop workflow per user instruction. Release signing requires the dedicated key, never a debug fallback.
 
 The historical desktop release downloads were removed by explicit user decision;
 do not restore them or apply the superseded retention policy from initial setup.

@@ -21,9 +21,8 @@ not replace the current development release.
 A manual workflow run defaults to `publish=false`: it validates and builds the
 selected main commit or matching stable tag without publishing. PRs and other
 branches only run checks and unsigned builds, without signing credentials.
-Desktop packaging remains in its separate workflow as downloadable Actions
-artifacts. Historical desktop release downloads were later removed by explicit
-user decision; do not restore them or add automatic desktop release publishing.
+Desktop packaging runs in its separate workflow and automatically publishes
+pre-releases (Alpha) for desktop installers and portable bundles on main pushes.
 
 ## Signing migration and secrets
 

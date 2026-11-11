@@ -254,3 +254,64 @@ jobs:
           path: |
             release-assets/*
           if-no-files-found: error
+
+  publish-desktop-release:
+    name: Publish Desktop Alpha Release
+    needs: build-desktop
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download All Desktop Release Assets
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd downloaded-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Desktop GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v4.0.0-desktop-alpha.${{ github.run_number }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TITLE="Desktop Alpha #${{ github.run_number }} (Ubuntu, macOS, Windows) [${SHORT_SHA}]"
+
+          cat << 'EOF' > release_notes.md
+          ## ClickControl — Desktop Alpha Release
+
+          > **Release Channel Note**: All Desktop builds (Ubuntu Linux, macOS Apple Silicon, Windows x64) are published automatically as **Alpha Pre-releases** on every push.
+
+          ### Included Desktop Installers & Portable Bundles
+          - **Ubuntu / Debian Linux (`x86_64`)**:
+            - `ClickControl-linux-amd64-4.0.0-alpha.BUILD_NUMBER.deb` — Native Debian/Ubuntu package (`sudo apt install ./ClickControl-linux-amd64-4.0.0-alpha.BUILD_NUMBER.deb`)
+            - `ClickControl-linux-x64-4.0.0-alpha.BUILD_NUMBER-portable.tar.gz` — Universal portable Linux archive
+          - **macOS (`Apple Silicon arm64`)**:
+            - `ClickControl-macos-arm64-4.0.0-alpha.BUILD_NUMBER.dmg` — macOS disk image containing `ClickControl.app` and `First_Time_Launch_Mac.command`
+            - `ClickControl-macos-arm64-4.0.0-alpha.BUILD_NUMBER-app.zip` — Portable macOS `.app` archive
+            - *macOS Launch Note*: After dragging to `/Applications`, run `xattr -cr /Applications/ClickControl.app` or select **Open Anyway** in **System Settings -> Privacy & Security**.
+          - **Windows (`x64`)**:
+            - `ClickControl-windows-x64-4.0.0-alpha.BUILD_NUMBER.msi` — Windows MSI installer
+            - `ClickControl-windows-x64-4.0.0-alpha.BUILD_NUMBER-setup.exe` — Windows Setup executable
+            - `ClickControl-windows-x64-4.0.0-alpha.BUILD_NUMBER-portable.zip` — Portable Windows archive
+            - *Windows SmartScreen Note*: Click **More info** -> **Run anyway** on first install.
+          EOF
+
+          sed -i "s/BUILD_NUMBER/${{ github.run_number }}/g" release_notes.md
+
+          gh release create "$TAG_NAME" downloaded-assets/* \
+            --title "$TITLE" \
+            --notes-file release_notes.md \
+            --prerelease \
+            --latest=false \
+            --target "${GITHUB_SHA}"
