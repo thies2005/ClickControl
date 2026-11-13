@@ -12,8 +12,8 @@ android {
         applicationId = "com.ankiride.bridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1000045
-        versionName = "1.0.0"
+        versionCode = 1000063
+        versionName = "1.1.0"
         // Keep literal defaults above for source builds; CI allocates monotonic codes.
         System.getenv("ANDROID_VERSION_CODE")?.let { versionCode = it.toInt() }
         System.getenv("ANDROID_VERSION_NAME")?.let { versionName = it }

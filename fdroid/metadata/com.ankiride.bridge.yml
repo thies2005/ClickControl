@@ -23,5 +23,5 @@ MaintainerNotes: |-
   exact toolchain and a verified dependency scan before adding Builds entries.
   Do not invent a Binaries/AllowedAPKSigningKeys claim without reproducibility.
 
-CurrentVersion: 1.0.0
-CurrentVersionCode: 1000045
+CurrentVersion: 1.1.0
+CurrentVersionCode: 1000063

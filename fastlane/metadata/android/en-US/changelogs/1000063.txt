@@ -1,0 +1,1 @@
+Add GenericInput device control with Screen Scroll swipes, Repeat while held for clicks, Page Up/Down/Home/End keys, floating HUD pill lifecycle sync, overlay calibrator boundary clamping, and Settings UX fixes.
