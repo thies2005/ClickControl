@@ -93,7 +93,12 @@ internal class WaylandInputBackend(
         }
         check(deviceWritable()) { "Wayland input requires ydotoold and write access to /dev/uinput" }
         val runtime = environment["XDG_RUNTIME_DIR"] ?: error("XDG_RUNTIME_DIR is not set")
-        val dir = Files.createTempDirectory(Path.of(runtime), "clickcontrol-input-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        val runtimeDir = Path.of(runtime)
+        val dir = if ("posix" in runtimeDir.fileSystem.supportedFileAttributeViews()) {
+            Files.createTempDirectory(runtimeDir, "clickcontrol-input-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        } else {
+            Files.createTempDirectory(runtimeDir, "clickcontrol-input-")
+        }
         directory = dir
         val path = dir.resolve("socket").toString()
         try {
