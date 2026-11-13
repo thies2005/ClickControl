@@ -41,4 +41,36 @@ class GenericPresetTest {
         assertFalse(InputConfig(.9f, 0f, .2f, 1f).validFor(MappedTargetAction.SCREEN_CLICK))
         assertFalse(InputConfig().validFor(MappedTargetAction.KEYBOARD_INPUT))
     }
+
+    @Test fun scrollRepeatAndExtendedKeysRoundTripCleanly() {
+        val scrollKey = PresetBindingKey(ClickButton.Y, PressType.SINGLE_CLICK)
+        val navKey = PresetBindingKey(ClickButton.B, PressType.SINGLE_CLICK)
+        val scrollConfig = InputConfig(
+            scrollDirection = ScrollDirection.LEFT,
+            scrollAmount = 7,
+            clickAtPointer = true,
+            repeatWhileHeld = true
+        )
+        val navConfig = InputConfig(key = PortableKey.PAGE_DOWN, repeatWhileHeld = true)
+        val preset = MappingPreset(
+            "p1",
+            "Presentation",
+            AnkiTarget.ANKIDROID,
+            mapOf(scrollKey to MappedTargetAction.SCREEN_SCROLL, navKey to MappedTargetAction.KEYBOARD_INPUT),
+            mapOf(scrollKey to scrollConfig, navKey to navConfig)
+        )
+        val (restored, active) = PresetStore.deserialize(PresetStore.serialize(listOf(preset), "p1"))!!
+        assertEquals("p1", active)
+        assertEquals(preset, restored.single())
+        assertTrue(PresetStore.isRepeatEnabled(AppConfiguration(presets = restored, activePresetId = "p1"), ClickButton.Y))
+        assertTrue(PresetStore.isRepeatEnabled(AppConfiguration(presets = restored, activePresetId = "p1"), ClickButton.B))
+        assertFalse(PresetStore.isRepeatEnabled(AppConfiguration(presets = restored, activePresetId = "p1"), ClickButton.Z))
+        assertFalse(scrollConfig.copy(scrollAmount = 0).validFor(MappedTargetAction.SCREEN_SCROLL))
+        assertFalse(scrollConfig.copy(scrollAmount = 21).validFor(MappedTargetAction.SCREEN_SCROLL))
+        assertFalse(InputConfig(left = 0.25f, top = 0.25f, width = 2.0f, height = 0.5f, scrollDirection = ScrollDirection.DOWN, scrollAmount = 3).validFor(MappedTargetAction.SCREEN_SCROLL))
+        assertTrue(InputConfig(left = 0.25f, top = 0.25f, width = 0.5f, height = 0.5f, scrollDirection = ScrollDirection.DOWN, scrollAmount = 3).validFor(MappedTargetAction.SCREEN_SCROLL))
+        for (k in listOf(PortableKey.PAGE_UP, PortableKey.PAGE_DOWN, PortableKey.HOME, PortableKey.END)) {
+            assertTrue(InputConfig(key = k).validFor(MappedTargetAction.KEYBOARD_INPUT))
+        }
+    }
 }

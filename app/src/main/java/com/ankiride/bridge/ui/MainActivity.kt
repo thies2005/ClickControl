@@ -237,7 +237,19 @@ fun AnkiRideDashboard(
                     }
                     Text("MyWhoosh location", style = MaterialTheme.typography.titleMedium)
                     listOf(OperatingMode.MODE_1_TABLET_SPLIT_SCREEN to "On this device", OperatingMode.MODE_2_TABLET_ANKI_PHONE_MYWHOOSH to "On another device").forEach { (mode, label) ->
-                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) { RadioButton(selected = config.mode == mode || (mode == OperatingMode.MODE_2_TABLET_ANKI_PHONE_MYWHOOSH && config.mode == OperatingMode.MODE_5_UBUNTU_ANKICONNECT) || (mode == OperatingMode.MODE_1_TABLET_SPLIT_SCREEN && config.mode == OperatingMode.MODE_4_MYWHOOSH_ONLY), onClick = { config = config.copy(mode = mode) }); Text(label) }
+                        val isSelected = config.mode == mode ||
+                            (mode == OperatingMode.MODE_2_TABLET_ANKI_PHONE_MYWHOOSH && config.mode == OperatingMode.MODE_5_UBUNTU_ANKICONNECT) ||
+                            (mode == OperatingMode.MODE_1_TABLET_SPLIT_SCREEN && config.mode == OperatingMode.MODE_4_MYWHOOSH_ONLY)
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable { config = config.copy(mode = mode) },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = isSelected, onClick = { config = config.copy(mode = mode) })
+                            Text(label)
+                        }
                     }
                     Text("Laptop Anki connection", style = MaterialTheme.typography.titleMedium)
                     OutlinedTextField(config.ubuntuAnkiConnectHost, { config = config.copy(ubuntuAnkiConnectHost = it) }, label = { Text("Host address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -252,10 +264,6 @@ fun AnkiRideDashboard(
                             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text(label); Switch(checked, change) }
                         }
                         OutlinedButton(onClick = { BridgeAccessibilityService.activeInstance?.let { com.ankiride.bridge.mywhoosh.MyShiftOverlayCalibrator.showCalibrationOverlay(it, config.mode) } }, enabled = a11yEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("Calibrate touch fallback") }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { BridgeForegroundService.triggerTestShift(MyWhooshAction.SHIFT_DOWN) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Test shift down") }
-                            OutlinedButton(onClick = { BridgeForegroundService.triggerTestShift(MyWhooshAction.SHIFT_UP) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Test shift up") }
-                        }
                         DiagnosticLogCard()
                     }
                 }

@@ -2,8 +2,12 @@ package com.ankiride.bridge.mywhoosh
 
 import com.ankiride.bridge.core.AppConfiguration
 import com.ankiride.bridge.core.DiagnosticLogger
+import com.ankiride.bridge.core.InputConfig
 import com.ankiride.bridge.core.LogCategory
+import com.ankiride.bridge.core.MappedTargetAction
 import com.ankiride.bridge.core.MyWhooshAction
+import com.ankiride.bridge.core.PortableKey
+import com.ankiride.bridge.service.DesktopGenericInputDispatcher
 import java.awt.GraphicsEnvironment
 import java.awt.MouseInfo
 import java.awt.Robot
@@ -13,15 +17,36 @@ import java.awt.event.KeyEvent
 
 object DesktopMyWhooshRobot {
 
+    private val isWayland: Boolean
+        get() = System.getenv("XDG_SESSION_TYPE")?.equals("wayland", true) == true
+
     private val robot: Robot? = try {
-        if (GraphicsEnvironment.isHeadless()) null else Robot()
+        if (GraphicsEnvironment.isHeadless() || isWayland) null else Robot()
     } catch (_: Exception) {
         null
     }
 
-    fun isAvailable(): Boolean = robot != null
+    fun isAvailable(): Boolean = isWayland || robot != null
 
     fun performKeyboardShiftOrAction(action: MyWhooshAction): Boolean {
+        val portableKey = when (action) {
+            MyWhooshAction.SHIFT_UP -> PortableKey.I
+            MyWhooshAction.SHIFT_DOWN -> PortableKey.K
+            MyWhooshAction.STEER_LEFT -> PortableKey.A
+            MyWhooshAction.STEER_RIGHT -> PortableKey.D
+            MyWhooshAction.HUD_TOGGLE -> PortableKey.H
+            MyWhooshAction.TOGGLE_CAMERA -> PortableKey.DIGIT_1
+            MyWhooshAction.EMOTE -> PortableKey.E
+            MyWhooshAction.UI_CONFIRM -> PortableKey.ENTER
+            MyWhooshAction.UI_BACK -> PortableKey.ESCAPE
+            else -> return false
+        }
+        if (isWayland) {
+            return DesktopGenericInputDispatcher.dispatch(
+                MappedTargetAction.KEYBOARD_INPUT,
+                InputConfig(key = portableKey)
+            )
+        }
         val r = robot ?: return false
         val keyCode = when (action) {
             MyWhooshAction.SHIFT_UP -> KeyEvent.VK_I
@@ -52,14 +77,20 @@ object DesktopMyWhooshRobot {
 
     fun performScreenClickFallback(action: MyWhooshAction, config: AppConfiguration): Boolean {
         if (action != MyWhooshAction.SHIFT_UP && action != MyWhooshAction.SHIFT_DOWN) return false
+        val (normX, normY) = if (action == MyWhooshAction.SHIFT_UP) {
+            config.myShiftUpNormalizedX to config.myShiftUpNormalizedY
+        } else {
+            config.myShiftDownNormalizedX to config.myShiftDownNormalizedY
+        }
+        if (isWayland) {
+            return DesktopGenericInputDispatcher.dispatch(
+                MappedTargetAction.SCREEN_CLICK,
+                InputConfig(left = (normX - 0.01f).coerceIn(0f, 0.98f), top = (normY - 0.01f).coerceIn(0f, 0.98f), width = 0.02f, height = 0.02f)
+            )
+        }
         val r = robot ?: return false
         return try {
             val screenSize = Toolkit.getDefaultToolkit().screenSize
-            val (normX, normY) = if (action == MyWhooshAction.SHIFT_UP) {
-                config.myShiftUpNormalizedX to config.myShiftUpNormalizedY
-            } else {
-                config.myShiftDownNormalizedX to config.myShiftDownNormalizedY
-            }
 
             val targetX = (screenSize.width * normX).toInt()
             val targetY = (screenSize.height * normY).toInt()
@@ -84,7 +115,9 @@ object DesktopMyWhooshRobot {
     fun inspectFocusedWindow(): String {
         return try {
             val os = System.getProperty("os.name", "").lowercase()
-            if (os.contains("linux")) {
+            if (isWayland) {
+                "Window inspection unavailable on Wayland (xdotool is X11-only)"
+            } else if (os.contains("linux")) {
                 val proc = ProcessBuilder("xdotool", "getactivewindow", "getwindowname").start()
                 val title = proc.inputStream.bufferedReader().readText().trim()
                 if (proc.waitFor() == 0 && title.isNotEmpty()) {

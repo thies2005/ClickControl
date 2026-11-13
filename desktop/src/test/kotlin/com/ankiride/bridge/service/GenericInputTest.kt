@@ -12,6 +12,7 @@ class GenericInputTest {
         override fun move(x: Int, y: Int) { calls.add("move:$x,$y") }
         override fun mousePress() { calls.add("mouseDown") }
         override fun mouseRelease() { calls.add("mouseUp") }
+        override fun mouseWheel(horizontal: Int, vertical: Int) { calls.add("wheel:$horizontal,$vertical") }
         override fun keyPress(code: Int) { calls.add("down:$code"); if (fail && code == KeyEvent.VK_A) error("failure") }
         override fun keyRelease(code: Int) { calls.add("up:$code") }
     }
@@ -73,5 +74,15 @@ class GenericInputTest {
         val driver = Driver()
         performInput(driver, MappedTargetAction.SCREEN_CLICK, InputConfig(.2f,.1f,.4f,.2f), Rectangle(10, 20, 101, 201))
         assertEquals(listOf("move:50,60", "mouseDown", "mouseUp"), driver.calls)
+    }
+
+    @Test fun scrollAtPointerAndFixedArea() {
+        val pointerDriver = Driver()
+        performInput(pointerDriver, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.DOWN, scrollAmount = 4, clickAtPointer = true), Rectangle(0, 0, 100, 100))
+        assertEquals(listOf("wheel:0,4"), pointerDriver.calls)
+
+        val areaDriver = Driver()
+        performInput(areaDriver, MappedTargetAction.SCREEN_SCROLL, InputConfig(left = .2f, top = .1f, width = .4f, height = .2f, scrollDirection = ScrollDirection.LEFT, scrollAmount = 2, clickAtPointer = false), Rectangle(10, 20, 101, 201))
+        assertEquals(listOf("move:50,60", "wheel:-2,0"), areaDriver.calls)
     }
 }

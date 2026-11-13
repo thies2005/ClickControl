@@ -188,4 +188,35 @@ class ZwiftGestureEngineTest {
         engine.processButtonStates(mapOf(ClickButton.Y to false), nowMs = 1000L)
         assertTrue(events.isEmpty())
     }
+
+    @Test
+    fun holdToRepeatEmitsImmediateClickAndPeriodicRepeatsWithoutLongPressOrReleaseDuplicate() {
+        val events = mutableListOf<ButtonGestureEvent>()
+        val engine = ZwiftGestureEngine(
+            isRepeatEnabled = { it == ClickButton.Y },
+            onGestureDetected = { events.add(it) }
+        )
+
+        engine.processButtonStates(mapOf(ClickButton.Y to true), nowMs = 1000L)
+        assertEquals(1, events.size)
+        assertEquals(PressType.SINGLE_CLICK, events[0].type)
+
+        // Held before 450ms threshold: no repeat yet
+        engine.processButtonStates(mapOf(ClickButton.Y to true), nowMs = 1400L)
+        assertEquals(1, events.size)
+
+        // Past threshold at 1500ms: emits repeat SINGLE_CLICK
+        engine.processButtonStates(mapOf(ClickButton.Y to true), nowMs = 1500L)
+        assertEquals(2, events.size)
+        assertEquals(PressType.SINGLE_CLICK, events[1].type)
+
+        // Next repeat interval (+120ms = 1620ms)
+        engine.processButtonStates(mapOf(ClickButton.Y to true), nowMs = 1625L)
+        assertEquals(3, events.size)
+
+        // Release at 1700ms: no duplicate click and no LONG_PRESS
+        engine.processButtonStates(mapOf(ClickButton.Y to false), nowMs = 1700L)
+        assertEquals(3, events.size)
+        assertTrue(events.all { it.type == PressType.SINGLE_CLICK })
+    }
 }

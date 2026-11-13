@@ -61,7 +61,9 @@ class ZwiftBleController(
     private val _gestureEvents = MutableSharedFlow<ButtonGestureEvent>(extraBufferCapacity = 64)
     override val gestureEvents: SharedFlow<ButtonGestureEvent> = _gestureEvents
 
-    private val gestureEngine = ZwiftGestureEngine { event ->
+    private val gestureEngine = ZwiftGestureEngine(
+        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) }
+    ) { event ->
         DiagnosticLogger.info(
             LogCategory.BLE,
             "Gesture detected: button=${event.button.name} (${event.button.displayName}), type=${event.type.name}"
@@ -74,6 +76,7 @@ class ZwiftBleController(
     private val podActiveMasks = ConcurrentHashMap<String, Int>() // address -> last activeMask
     private val lastLoggedPayloadHex = ConcurrentHashMap<String, String>()
     private var leftPodWatchdogJob: Job? = null
+    private var tickerJob: Job? = null
     private var currentConfig = AppConfiguration()
     private var isScanning = false
 
@@ -157,7 +160,25 @@ class ZwiftBleController(
         )
         _connectionState.value = BleConnectionState.SCANNING
         isScanning = true
+        startTicker()
         scanner.startScan(filters, settings, scanCallback)
+    }
+
+    private fun startTicker() {
+        tickerJob?.cancel()
+        tickerJob = scope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(25L)
+                if (podActiveMasks.values.any { it != 0 }) {
+                    val combinedMask = podActiveMasks.values.fold(0) { acc, m -> acc or m }
+                    val combinedMap = EnumMap<ClickButton, Boolean>(ClickButton::class.java)
+                    ClickButton.entries.forEach { button ->
+                        combinedMap[button] = (combinedMask and button.bitmask) != 0
+                    }
+                    gestureEngine.processButtonStates(combinedMap, System.currentTimeMillis())
+                }
+            }
+        }
     }
 
     private fun connectToDevice(device: BluetoothDevice, isLeftPod: Boolean) {
@@ -353,6 +374,8 @@ class ZwiftBleController(
 
     override fun disconnect() {
         leftPodWatchdogJob?.cancel()
+        tickerJob?.cancel()
+        tickerJob = null
         if (isScanning && bluetoothAdapter?.isEnabled == true) {
             bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback)
             isScanning = false

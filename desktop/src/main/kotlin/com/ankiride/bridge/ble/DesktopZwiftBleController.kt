@@ -52,7 +52,9 @@ class DesktopZwiftBleController(
     }
     private val currentButtonMapLock = Any()
 
-    private val gestureEngine = ZwiftGestureEngine { event ->
+    private val gestureEngine = ZwiftGestureEngine(
+        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) }
+    ) { event ->
         DiagnosticLogger.info(
             LogCategory.BLE,
             "Gesture detected: button=${event.button.name} (${event.button.displayName}), type=${event.type.name}"
@@ -120,6 +122,7 @@ class DesktopZwiftBleController(
         workerProcess = null
 
         workerJob = scope.launch(Dispatchers.IO) {
+            var bootstrapFailures = 0
             while (isActive && isRunningBridge) {
                 var process: Process? = null
                 var stderrJob: Job? = null
@@ -138,7 +141,8 @@ class DesktopZwiftBleController(
                         if (scriptFile == null || !scriptFile.exists()) {
                             DiagnosticLogger.error(LogCategory.BLE, "Unable to extract or locate zwift_ble_worker.py")
                             _connectionState.value = BleConnectionState.ERROR
-                            if (isRunningBridge) delay(2000L)
+                            bootstrapFailures++
+                            if (isRunningBridge) delay(minOf(10_000L, 2_000L * bootstrapFailures))
                             continue
                         }
 
@@ -146,14 +150,17 @@ class DesktopZwiftBleController(
                         if (pythonCmd == null) {
                             DiagnosticLogger.error(LogCategory.BLE, "Python executable with 'bleak' could not be resolved or bootstrapped")
                             _connectionState.value = BleConnectionState.ERROR
-                            if (isRunningBridge) delay(2000L)
+                            bootstrapFailures++
+                            if (isRunningBridge) delay(minOf(10_000L, 2_000L * bootstrapFailures))
                             continue
                         }
+                        bootstrapFailures = 0
 
                         command = mutableListOf(
                             pythonCmd,
                             scriptFile.absolutePath,
-                            "--right-only", (currentConfig.podAssignment == PodAssignment.RIGHT_ANKI_ONLY || (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED && currentConfig.rightPodOnlyNoZwift)).toString()
+                            "--right-only", (currentConfig.podAssignment == PodAssignment.RIGHT_ANKI_ONLY || (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED && currentConfig.rightPodOnlyNoZwift)).toString(),
+                            "--left-reconnect-sec", currentConfig.leftPodAutoReconnectSec.toString()
                         )
                     }
 
@@ -315,6 +322,8 @@ class DesktopZwiftBleController(
                             _connectionState.value = BleConnectionState.CONNECTED_RIGHT_ONLY
                         } else if (_connectedLeftMac.value != null) {
                             _connectionState.value = BleConnectionState.CONNECTED_LEFT_ONLY
+                        } else if (isRunningBridge) {
+                            _connectionState.value = BleConnectionState.SCANNING
                         } else {
                             _connectionState.value = BleConnectionState.DISCONNECTED
                         }

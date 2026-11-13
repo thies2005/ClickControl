@@ -13,7 +13,7 @@ object PresetStore {
             append(preset.id).append('|').append(encode(preset.name)).append('|').append(preset.ankiTarget.name)
             preset.bindings.forEach { (key, action) ->
                 append('|').append(key.button.name).append(',').append(key.pressType.name).append(',').append(action.name)
-                preset.inputConfigs[key]?.let { c -> append(',').append(encode(listOf(c.left, c.top, c.width, c.height, c.key?.name ?: "", c.ctrl, c.alt, c.shift, c.meta, c.clickAtPointer).joinToString(";"))) }
+                preset.inputConfigs[key]?.let { c -> append(',').append(encode(listOf(c.left, c.top, c.width, c.height, c.key?.name ?: "", c.ctrl, c.alt, c.shift, c.meta, c.clickAtPointer, c.scrollDirection.name, c.scrollAmount, c.repeatWhileHeld).joinToString(";"))) }
             }
             append('\n')
         }
@@ -33,7 +33,15 @@ object PresetStore {
                 bindings[key] = action
                 if (values.size > 3) try {
                     val c = decode(values[3]).split(';')
-                    val payload = InputConfig(c[0].toFloat(), c[1].toFloat(), c[2].toFloat(), c[3].toFloat(), c[4].takeIf { it.isNotEmpty() }?.let(PortableKey::valueOf), c[5].toBooleanStrict(), c[6].toBooleanStrict(), c[7].toBooleanStrict(), c[8].toBooleanStrict(), c.getOrNull(9)?.toBooleanStrict() ?: false)
+                    val payload = InputConfig(
+                        left = c[0].toFloat(), top = c[1].toFloat(), width = c[2].toFloat(), height = c[3].toFloat(),
+                        key = c[4].takeIf { it.isNotEmpty() }?.let(PortableKey::valueOf),
+                        ctrl = c[5].toBooleanStrict(), alt = c[6].toBooleanStrict(), shift = c[7].toBooleanStrict(), meta = c[8].toBooleanStrict(),
+                        clickAtPointer = c.getOrNull(9)?.toBooleanStrict() ?: false,
+                        scrollDirection = c.getOrNull(10)?.takeIf { it.isNotEmpty() }?.let(ScrollDirection::valueOf) ?: ScrollDirection.DOWN,
+                        scrollAmount = c.getOrNull(11)?.toIntOrNull() ?: 3,
+                        repeatWhileHeld = c.getOrNull(12)?.toBooleanStrict() ?: false
+                    )
                     configs[key] = payload
                 } catch (_: Exception) { /* A bad payload disables only this binding. */ }
             }
@@ -45,8 +53,16 @@ object PresetStore {
 
     fun bindingLabel(preset: MappingPreset, key: PresetBindingKey): String {
         val action = preset.bindings[key] ?: MappedTargetAction.NONE
-        if (action != MappedTargetAction.SCREEN_CLICK && action != MappedTargetAction.KEYBOARD_INPUT) return action.label
+        if (!action.isGenericInput) return action.label
         return preset.inputConfigs[key]?.takeIf { it.validFor(action) }?.label(action) ?: "${action.label} (not configured)"
+    }
+    fun isRepeatEnabled(config: AppConfiguration, button: ClickButton): Boolean {
+        val preset = active(config) ?: return false
+        val key = PresetBindingKey(button.canonicalButton, PressType.SINGLE_CLICK)
+        val action = preset.bindings[key] ?: return false
+        if (!action.isGenericInput) return false
+        val payload = preset.inputConfigs[key] ?: return false
+        return payload.validFor(action) && payload.repeatWhileHeld
     }
     fun standardBindings(): Map<PresetBindingKey, MappedTargetAction> = snapshot("Standard", AnkiTarget.ANKICONNECT) { button, press ->
         when (button) {

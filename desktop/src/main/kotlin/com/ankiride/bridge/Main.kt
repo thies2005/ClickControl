@@ -189,39 +189,51 @@ fun runHeadlessSelfTest() {
 
 fun main(args: Array<String>) {
     if (args.contains("--live-input-test")) {
-        // Explicit, opt-in integration hook: key A, pointer, click LEFT TOP WIDTH HEIGHT, or sequence.
+        // Explicit, opt-in integration hook: key A, pointer, click LEFT TOP WIDTH HEIGHT, scroll DIR [AMOUNT], or sequence.
         val i = args.indexOf("--live-input-test")
-        val action = args.getOrNull(i + 1) ?: error("Expected key or click")
+        val action = args.getOrNull(i + 1) ?: error("Expected key, click, pointer, scroll, or sequence")
         Thread.sleep(3000) // Allow the operator to focus the target window.
-        when (action) {
-            "key" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
-                com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
-                com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.valueOf(args[i + 2])))
-            "pointer" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
-                com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
-                com.ankiride.bridge.core.InputConfig(clickAtPointer = true))
-            "click" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
-                com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
-                com.ankiride.bridge.core.InputConfig(args[i + 2].toFloat(), args[i + 3].toFloat(), args[i + 4].toFloat(), args[i + 5].toFloat()))
-            "sequence" -> {
-                val dispatcher = com.ankiride.bridge.service.DesktopGenericInputDispatcher
-                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
-                    com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.A))
-                Thread.sleep(250)
-                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
-                    com.ankiride.bridge.core.InputConfig(.19f, .19f, .02f, .02f))
-                Thread.sleep(250)
-                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
-                    com.ankiride.bridge.core.InputConfig(.79f, .79f, .02f, .02f))
-                Thread.sleep(250)
-                dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+        try {
+            when (action) {
+                "key" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                    com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
+                    com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.valueOf(args[i + 2])))
+                "pointer" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                    com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
                     com.ankiride.bridge.core.InputConfig(clickAtPointer = true))
+                "click" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                    com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                    com.ankiride.bridge.core.InputConfig(args[i + 2].toFloat(), args[i + 3].toFloat(), args[i + 4].toFloat(), args[i + 5].toFloat()))
+                "scroll" -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.executeNow(
+                    com.ankiride.bridge.core.MappedTargetAction.SCREEN_SCROLL,
+                    com.ankiride.bridge.core.InputConfig(
+                        clickAtPointer = true,
+                        scrollDirection = com.ankiride.bridge.core.ScrollDirection.valueOf(args.getOrNull(i + 2)?.uppercase() ?: "DOWN"),
+                        scrollAmount = args.getOrNull(i + 3)?.toIntOrNull()?.coerceIn(1, 20) ?: 3
+                    ))
+                "sequence" -> {
+                    val dispatcher = com.ankiride.bridge.service.DesktopGenericInputDispatcher
+                    dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.KEYBOARD_INPUT,
+                        com.ankiride.bridge.core.InputConfig(key = com.ankiride.bridge.core.PortableKey.A))
+                    Thread.sleep(250)
+                    dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                        com.ankiride.bridge.core.InputConfig(.19f, .19f, .02f, .02f))
+                    Thread.sleep(250)
+                    dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                        com.ankiride.bridge.core.InputConfig(.79f, .79f, .02f, .02f))
+                    Thread.sleep(250)
+                    dispatcher.executeNow(com.ankiride.bridge.core.MappedTargetAction.SCREEN_CLICK,
+                        com.ankiride.bridge.core.InputConfig(clickAtPointer = true))
+                }
+                else -> error("Expected key, click, pointer, scroll, or sequence")
             }
-            else -> error("Expected key, click, pointer, or sequence")
+            // Keep an owned virtual device alive until the compositor consumes the final event.
+            Thread.sleep(250)
+            println("LIVE_INPUT_SENT")
+        } catch (e: Exception) {
+            System.err.println("LIVE_INPUT_UNAVAILABLE: ${e.message}")
+            exitProcess(1)
         }
-        // Keep an owned virtual device alive until the compositor consumes the final event.
-        Thread.sleep(250)
-        println("LIVE_INPUT_SENT")
         return
     }
     if (args.contains("--self-test")) {

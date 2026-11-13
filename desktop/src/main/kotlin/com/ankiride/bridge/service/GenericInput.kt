@@ -13,6 +13,7 @@ interface InputDriver {
     fun move(x: Int, y: Int)
     fun mousePress()
     fun mouseRelease()
+    fun mouseWheel(horizontal: Int, vertical: Int)
     fun keyPress(code: Int)
     fun keyRelease(code: Int)
 }
@@ -22,22 +23,44 @@ class RobotInputDriver : InputDriver {
     override fun move(x: Int, y: Int) = robot.mouseMove(x, y)
     override fun mousePress() = robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
     override fun mouseRelease() = robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+    override fun mouseWheel(horizontal: Int, vertical: Int) {
+        if (vertical != 0) robot.mouseWheel(vertical)
+        if (horizontal != 0) {
+            robot.keyPress(KeyEvent.VK_SHIFT)
+            try { robot.mouseWheel(horizontal) } finally { robot.keyRelease(KeyEvent.VK_SHIFT) }
+        }
+    }
     override fun keyPress(code: Int) = robot.keyPress(code)
     override fun keyRelease(code: Int) = robot.keyRelease(code)
 }
 
 internal fun performInput(driver: InputDriver, action: MappedTargetAction, c: InputConfig, bounds: java.awt.Rectangle) {
-    if (action == MappedTargetAction.SCREEN_CLICK) {
-        if (!c.clickAtPointer) driver.move(bounds.x + ((c.left + c.width / 2) * (bounds.width - 1)).toInt(), bounds.y + ((c.top + c.height / 2) * (bounds.height - 1)).toInt())
-        try { driver.mousePress() } finally { driver.mouseRelease() }
-    } else {
-        val name = if (c.key == PortableKey.BACKSPACE) "BACK_SPACE" else c.key!!.name.removePrefix("DIGIT_")
-        val key = KeyEvent::class.java.getField("VK_$name").getInt(null)
-        val modifiers = listOfNotNull(KeyEvent.VK_CONTROL.takeIf { c.ctrl }, KeyEvent.VK_ALT.takeIf { c.alt }, KeyEvent.VK_SHIFT.takeIf { c.shift }, KeyEvent.VK_META.takeIf { c.meta })
-        val pressed = mutableListOf<Int>()
-        try {
-            for (code in modifiers + key) { pressed.add(code); driver.keyPress(code) }
-        } finally { pressed.asReversed().forEach { try { driver.keyRelease(it) } catch (_: Exception) {} } }
+    when (action) {
+        MappedTargetAction.SCREEN_CLICK -> {
+            if (!c.clickAtPointer) driver.move(bounds.x + ((c.left + c.width / 2) * (bounds.width - 1)).toInt(), bounds.y + ((c.top + c.height / 2) * (bounds.height - 1)).toInt())
+            try { driver.mousePress() } finally { driver.mouseRelease() }
+        }
+        MappedTargetAction.SCREEN_SCROLL -> {
+            if (!c.clickAtPointer && c.width > 0f && c.height > 0f) {
+                driver.move(bounds.x + ((c.left + c.width / 2) * (bounds.width - 1)).toInt(), bounds.y + ((c.top + c.height / 2) * (bounds.height - 1)).toInt())
+            }
+            val (dx, dy) = when (c.scrollDirection) {
+                ScrollDirection.UP -> 0 to -c.scrollAmount
+                ScrollDirection.DOWN -> 0 to c.scrollAmount
+                ScrollDirection.LEFT -> -c.scrollAmount to 0
+                ScrollDirection.RIGHT -> c.scrollAmount to 0
+            }
+            driver.mouseWheel(dx, dy)
+        }
+        else -> {
+            val name = if (c.key == PortableKey.BACKSPACE) "BACK_SPACE" else c.key!!.name.removePrefix("DIGIT_")
+            val key = KeyEvent::class.java.getField("VK_$name").getInt(null)
+            val modifiers = listOfNotNull(KeyEvent.VK_CONTROL.takeIf { c.ctrl }, KeyEvent.VK_ALT.takeIf { c.alt }, KeyEvent.VK_SHIFT.takeIf { c.shift }, KeyEvent.VK_META.takeIf { c.meta })
+            val pressed = mutableListOf<Int>()
+            try {
+                for (code in modifiers + key) { pressed.add(code); driver.keyPress(code) }
+            } finally { pressed.asReversed().forEach { try { driver.keyRelease(it) } catch (_: Exception) {} } }
+        }
     }
 }
 
@@ -48,6 +71,9 @@ internal class GuardedInputDriver(private val delegate: InputDriver, private val
     }
     override fun mousePress() {
         if (delegate is WaylandInputBackend) delegate.mousePressChecked(valid) else { checkValid(); delegate.mousePress() }
+    }
+    override fun mouseWheel(horizontal: Int, vertical: Int) {
+        if (delegate is WaylandInputBackend) delegate.mouseWheelChecked(horizontal, vertical, valid) else { checkValid(); delegate.mouseWheel(horizontal, vertical) }
     }
     override fun keyPress(code: Int) {
         if (delegate is WaylandInputBackend) delegate.keyPressChecked(code, valid) else { checkValid(); delegate.keyPress(code) }
@@ -77,7 +103,8 @@ object DesktopGenericInputDispatcher : GenericInputDispatcher {
     internal fun executeNow(action: MappedTargetAction, config: InputConfig, valid: () -> Boolean = { true }) {
         require(config.validFor(action))
         if (isWayland) {
-            val bounds = if (action == MappedTargetAction.SCREEN_CLICK && !config.clickAtPointer) waylandBounds() else java.awt.Rectangle(1, 1)
+            val needsBounds = !config.clickAtPointer && (action == MappedTargetAction.SCREEN_CLICK || (action == MappedTargetAction.SCREEN_SCROLL && config.width > 0f && config.height > 0f))
+            val bounds = if (needsBounds) waylandBounds() else java.awt.Rectangle(1, 1)
             wayland.initialize()
             if (!valid()) return
             performInput(GuardedInputDriver(wayland, valid), action, config, bounds)

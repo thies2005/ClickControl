@@ -42,7 +42,7 @@ class DesktopActionRouter(
 
         DesktopFeedbackCueManager.triggerCue(target, config)
 
-        if (target == MappedTargetAction.SCREEN_CLICK || target == MappedTargetAction.KEYBOARD_INPUT) {
+        if (target.isGenericInput) {
             val key = PresetBindingKey(event.button.canonicalButton, event.type)
             val payload = PresetStore.active(config)?.inputConfigs?.get(key)
             synchronized(DesktopGenericInputDispatcher.routingLock) {

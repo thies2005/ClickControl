@@ -39,5 +39,11 @@ class SideTest(unittest.TestCase):
         self.assertTrue(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_LEFT)))
         self.assertFalse(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_RIGHT)))
 
+    def test_left_reconnect_window_configuration(self):
+        w = worker.ZwiftBleWorker(left_reconnect_sec=12)
+        self.assertEqual(12, w.left_reconnect_sec)
+        self.assertTrue(w.running)
+        self.assertEqual(0, worker.ZwiftBleWorker(left_reconnect_sec=-5).left_reconnect_sec)
+
 if __name__ == '__main__':
     unittest.main()

@@ -46,7 +46,7 @@ class ActionRouter(
             actionText = PresetStore.active(config)?.let { PresetStore.bindingLabel(it, PresetBindingKey(event.button.canonicalButton, event.type)) } ?: target.label
         )
 
-        if (target == MappedTargetAction.SCREEN_CLICK || target == MappedTargetAction.KEYBOARD_INPUT) {
+        if (target.isGenericInput) {
             val key = PresetBindingKey(event.button.canonicalButton, event.type)
             val payload = PresetStore.active(config)?.inputConfigs?.get(key)
             synchronized(AndroidGenericInputDispatcher.routingLock) {

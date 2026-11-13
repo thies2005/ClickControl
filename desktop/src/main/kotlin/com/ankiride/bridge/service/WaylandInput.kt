@@ -66,7 +66,9 @@ internal val evdevKeys = mapOf(
     KeyEvent.VK_F3 to 61, KeyEvent.VK_F4 to 62, KeyEvent.VK_F5 to 63, KeyEvent.VK_F6 to 64,
     KeyEvent.VK_F7 to 65, KeyEvent.VK_F8 to 66, KeyEvent.VK_F9 to 67, KeyEvent.VK_F10 to 68,
     KeyEvent.VK_F11 to 87, KeyEvent.VK_F12 to 88, KeyEvent.VK_CONTROL to 29,
-    KeyEvent.VK_ALT to 56, KeyEvent.VK_SHIFT to 42, KeyEvent.VK_META to 125
+    KeyEvent.VK_ALT to 56, KeyEvent.VK_SHIFT to 42, KeyEvent.VK_META to 125,
+    KeyEvent.VK_PAGE_UP to 104, KeyEvent.VK_PAGE_DOWN to 109,
+    KeyEvent.VK_HOME to 102, KeyEvent.VK_END to 107
 )
 
 internal class WaylandInputBackend(
@@ -95,7 +97,11 @@ internal class WaylandInputBackend(
         directory = dir
         val path = dir.resolve("socket").toString()
         try {
-            child = runner.start(listOf("ydotoold", "--socket-path", path, "--socket-perm", "0600"))
+            child = try {
+                runner.start(listOf("ydotoold", "--socket-path", path, "--socket-perm", "0600"))
+            } catch (e: java.io.IOException) {
+                throw IllegalStateException("Wayland input requires ydotool/ydotoold installed on PATH (${e.message})", e)
+            }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
             while (System.nanoTime() < deadline && child!!.isAlive && !probe(path)) Thread.sleep(50)
             check(child!!.isAlive && probe(path)) { "ydotoold did not become ready" }
@@ -125,6 +131,9 @@ internal class WaylandInputBackend(
     override fun mousePress() = mousePressChecked { true }
     fun mousePressChecked(valid: () -> Boolean) = command("click", "0x40", valid = valid)
     override fun mouseRelease() = command("click", "0x80")
+    override fun mouseWheel(horizontal: Int, vertical: Int) = mouseWheelChecked(horizontal, vertical) { true }
+    fun mouseWheelChecked(horizontal: Int, vertical: Int, valid: () -> Boolean) =
+        command("mousemove", "-w", "--", horizontal.toString(), vertical.toString(), valid = valid)
     override fun keyPress(code: Int) = keyPressChecked(code) { true }
     fun keyPressChecked(code: Int, valid: () -> Boolean) = command("key", "${evdevKeys[code] ?: error("Unsupported key $code")}:1", valid = valid)
     override fun keyRelease(code: Int) = command("key", "${evdevKeys[code] ?: error("Unsupported key $code")}:0")

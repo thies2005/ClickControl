@@ -149,7 +149,6 @@ fun DesktopAppUi(
                             OutlinedButton(onClick = { advanced = !advanced }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
                             if (advanced) {
                                 StudioHardwareAndAutostartTab(config, connectedRightMac, connectedLeftMac, onConfigChange)
-                                DesktopOptionsCard(config = config, onConfigChange = onConfigChange)
                                 NetworkingTestCard(config = config, onConfigChange = onConfigChange, hasMyWhooshClient = hasMyWhooshClient, onTestAnkiAction = onTestAnkiAction, onTestMyWhooshAction = onTestMyWhooshAction)
                                 StudioDiagnosticLogsTab()
                                 OutlinedButton(onClick = onMinimizeToTray) { Text("Minimize to tray") }
@@ -1163,9 +1162,7 @@ private fun StudioNetworkAndTestsTab(
     onTestMyWhooshAction: (MyWhooshAction) -> Unit
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         NetworkingTestCard(
@@ -1243,9 +1240,7 @@ private fun StudioHardwareAndAutostartTab(
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Card(
@@ -1388,9 +1383,7 @@ private fun StudioHardwareAndAutostartTab(
 @Composable
 private fun StudioDiagnosticLogsTab() {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+        modifier = Modifier.fillMaxWidth()
     ) {
         DiagnosticLogViewerCard()
     }
@@ -1417,37 +1410,15 @@ fun NetworkingTestCard(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "AnkiConnect (:8765) & OpenBikeControl (:21587)",
+                text = "AnkiConnect (:${config.ubuntuAnkiConnectPort}) & OpenBikeControl (:${config.openBikeServerPort})",
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp
             )
             Text(
-                text = "Configure AnkiConnect target address and trigger manual test dispatches to verify connectivity.",
+                text = "Trigger manual test dispatches to ${config.ubuntuAnkiConnectHost}:${config.ubuntuAnkiConnectPort} and inspect OpenBikeControl status.",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedTextField(
-                    value = config.ubuntuAnkiConnectHost,
-                    onValueChange = { onConfigChange(config.copy(ubuntuAnkiConnectHost = it.trim())) },
-                    label = { Text("AnkiConnect Host (e.g. 127.0.0.1 or LAN IP)") },
-                    modifier = Modifier.weight(1f)
-                )
-
-                OutlinedTextField(
-                    value = config.ubuntuAnkiConnectPort.toString(),
-                    onValueChange = { input ->
-                        val port = input.filter { it.isDigit() }.toIntOrNull() ?: 8765
-                        onConfigChange(config.copy(ubuntuAnkiConnectPort = port))
-                    },
-                    label = { Text("Port") },
-                    modifier = Modifier.width(110.dp)
-                )
-            }
 
             Text(text = "Manual Connection & Shifting Tests:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
 

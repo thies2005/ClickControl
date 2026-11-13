@@ -119,4 +119,38 @@ class WaylandInputTest {
         }
         assertEquals(Rectangle(0, 0, 1536, 960), waylandBounds(runner, "ubuntu:GNOME"))
     }
+
+    @Test fun mouseWheelEmitsSignedYdotoolStepsAndChecksPageNavigationKeys() {
+        val runner = Runner()
+        val backend = WaylandInputBackend(runner, mapOf("YDOTOOL_SOCKET" to "/external")) { false }
+        performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.DOWN, scrollAmount = 3, clickAtPointer = true), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.UP, scrollAmount = 2, clickAtPointer = true), Rectangle(1, 1))
+        assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "0", "3") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "0", "-2") })
+        performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.PAGE_UP), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.PAGE_DOWN), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.HOME), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.END), Rectangle(1, 1))
+        assertTrue(runner.calls.any { it == listOf("ydotool", "key", "104:1") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "key", "109:1") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "key", "102:1") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "key", "107:1") })
+    }
+
+    @Test fun missingYdotoolBinaryReportsClearInstallError() {
+        val runner = object : InputCommandRunner {
+            override fun run(args: List<String>, environment: Map<String, String>, timeoutMs: Long): String {
+                if (args.contains("ydotoold") || args.first() == "ydotool") throw java.io.IOException("No such file")
+                return ""
+            }
+            override fun start(args: List<String>): Process = throw java.io.IOException("Cannot run program \"ydotoold\"")
+        }
+        val backend = WaylandInputBackend(runner, mapOf("XDG_RUNTIME_DIR" to System.getProperty("java.io.tmpdir"))) { true }
+        try {
+            backend.initialize()
+            fail("expected IllegalStateException")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("ydotool"))
+        }
+    }
 }

@@ -102,7 +102,7 @@ object MyShiftOverlayCalibrator {
         }
         val closeParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            topMargin = 40
+            topMargin = (72 * service.resources.displayMetrics.density).toInt()
         }
         root.addView(closeBtn, closeParams)
 
@@ -129,18 +129,47 @@ object MyShiftOverlayCalibrator {
         var curDownX = initialDownX
         var curDownY = initialDownY
 
+        fun clampPosition(v: View, rawX: Float, rawY: Float) {
+            val maxX = (root.width - v.width).coerceAtLeast(0).toFloat()
+            val maxY = (root.height - v.height).coerceAtLeast(0).toFloat()
+            v.x = rawX.coerceIn(0f, maxX)
+            v.y = rawY.coerceIn(0f, maxY)
+        }
+
         fun positionView(v: View, normX: Float, normY: Float) {
-            val displayMetrics = service.resources.displayMetrics
-            v.x = (displayMetrics.widthPixels * normX) - 50f
-            v.y = (displayMetrics.heightPixels * normY) - 50f
+            val widthPx = if (root.width > 0) root.width else service.resources.displayMetrics.widthPixels
+            val heightPx = if (root.height > 0) root.height else service.resources.displayMetrics.heightPixels
+            val halfW = if (v.width > 0) v.width / 2f else 50f
+            val halfH = if (v.height > 0) v.height / 2f else 50f
+            clampPosition(v, (widthPx * normX) - halfW, (heightPx * normY) - halfH)
         }
 
         root.addView(upTarget, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         root.addView(downTarget, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
 
-        root.post {
+        var initialPositioned = false
+        var lastLayoutWidth = 0
+        var lastLayoutHeight = 0
+        root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (root.width <= 0 || upTarget.width <= 0 || downTarget.width <= 0) return@addOnLayoutChangeListener
+            if (initialPositioned && lastLayoutWidth == root.width && lastLayoutHeight == root.height) return@addOnLayoutChangeListener
+            initialPositioned = true
+            lastLayoutWidth = root.width
+            lastLayoutHeight = root.height
             positionView(upTarget, curUpX, curUpY)
             positionView(downTarget, curDownX, curDownY)
+            // Keep default adjacent targets legible and non-overlapping in narrow portrait screens.
+            val padPx = (12 * service.resources.displayMetrics.density)
+            val overlapX = downTarget.x < upTarget.x + upTarget.width && downTarget.x + downTarget.width > upTarget.x
+            val overlapY = downTarget.y < upTarget.y + upTarget.height && downTarget.y + downTarget.height > upTarget.y
+            if (overlapX && overlapY) {
+                val leftOfUp = upTarget.x - downTarget.width - padPx
+                if (leftOfUp >= 0f) {
+                    clampPosition(downTarget, leftOfUp, upTarget.y)
+                } else {
+                    clampPosition(downTarget, downTarget.x, upTarget.y - downTarget.height - padPx)
+                }
+            }
         }
 
         // Drag listener for Up target
@@ -154,11 +183,10 @@ object MyShiftOverlayCalibrator {
                         dY = view.y - event.rawY
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        view.x = event.rawX + dX
-                        view.y = event.rawY + dY
+                        clampPosition(view, event.rawX + dX, event.rawY + dY)
                         val displayMetrics = service.resources.displayMetrics
-                        curUpX = (view.x + (view.width / 2f)) / displayMetrics.widthPixels
-                        curUpY = (view.y + (view.height / 2f)) / displayMetrics.heightPixels
+                        curUpX = ((view.x + (view.width / 2f)) / displayMetrics.widthPixels).coerceIn(0f, 1f)
+                        curUpY = ((view.y + (view.height / 2f)) / displayMetrics.heightPixels).coerceIn(0f, 1f)
                         onCoordinatesChanged?.invoke(curUpX, curUpY, curDownX, curDownY)
                     }
                     MotionEvent.ACTION_UP -> {
@@ -183,11 +211,10 @@ object MyShiftOverlayCalibrator {
                         dY = view.y - event.rawY
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        view.x = event.rawX + dX
-                        view.y = event.rawY + dY
+                        clampPosition(view, event.rawX + dX, event.rawY + dY)
                         val displayMetrics = service.resources.displayMetrics
-                        curDownX = (view.x + (view.width / 2f)) / displayMetrics.widthPixels
-                        curDownY = (view.y + (view.height / 2f)) / displayMetrics.heightPixels
+                        curDownX = ((view.x + (view.width / 2f)) / displayMetrics.widthPixels).coerceIn(0f, 1f)
+                        curDownY = ((view.y + (view.height / 2f)) / displayMetrics.heightPixels).coerceIn(0f, 1f)
                         onCoordinatesChanged?.invoke(curUpX, curUpY, curDownX, curDownY)
                     }
                     MotionEvent.ACTION_UP -> {

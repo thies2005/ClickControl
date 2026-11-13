@@ -74,7 +74,7 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
         } else Text("Destination: local Anki", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(if (dirty) "Unsaved changes" else "Saved", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { if (draft.name.isNotBlank()) onChange(config.copy(presets = config.presets.map { if (it.id == current.id) draft.copy(name = draft.name.trim()) else it })) }, enabled = dirty && draft.name.isNotBlank() && draft.bindings.all { (key, action) -> action !in listOf(MappedTargetAction.SCREEN_CLICK, MappedTargetAction.KEYBOARD_INPUT) || draft.inputConfigs[key]?.validFor(action) == true }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Save") }
+            Button(onClick = { if (draft.name.isNotBlank()) onChange(config.copy(presets = config.presets.map { if (it.id == current.id) draft.copy(name = draft.name.trim()) else it })) }, enabled = dirty && draft.name.isNotBlank() && draft.bindings.all { (key, action) -> !action.isGenericInput || draft.inputConfigs[key]?.validFor(action) == true }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Save") }
             Box {
                 OutlinedButton(onClick = { managementOpen = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Manage ▾") }
                 DropdownMenu(expanded = managementOpen, onDismissRequest = { managementOpen = false }) {
@@ -122,6 +122,7 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
                         val defaults = when (action) {
                             MappedTargetAction.SCREEN_CLICK -> InputConfig(left = .4f, top = .4f, width = .2f, height = .2f)
                             MappedTargetAction.KEYBOARD_INPUT -> InputConfig(key = PortableKey.ENTER)
+                            MappedTargetAction.SCREEN_SCROLL -> InputConfig(scrollDirection = ScrollDirection.DOWN, scrollAmount = 3, clickAtPointer = true, left = .25f, top = .25f, width = .5f, height = .5f)
                             else -> null
                         }
                         draft = draft.copy(bindings = draft.bindings + (key to action), inputConfigs = if (defaults == null) draft.inputConfigs - key else draft.inputConfigs + (key to defaults)); actionMenu = null
@@ -129,38 +130,58 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
                 }
             }
             val action = draft.bindings[key] ?: MappedTargetAction.NONE
-            if (action == MappedTargetAction.SCREEN_CLICK || action == MappedTargetAction.KEYBOARD_INPUT) {
+            if (action.isGenericInput) {
                 val payload = draft.inputConfigs[key] ?: InputConfig()
                 fun update(c: InputConfig) { draft = draft.copy(inputConfigs = draft.inputConfigs + (key to c)) }
                 Text(com.ankiride.bridge.service.DesktopGenericInputDispatcher.inputStatus, style = MaterialTheme.typography.bodySmall)
-                if (action == MappedTargetAction.SCREEN_CLICK) {
-                    FilterChip(selected = payload.clickAtPointer, onClick = { update(payload.copy(clickAtPointer = !payload.clickAtPointer)) }, label = { Text("Click at current pointer") })
-                    if (!payload.clickAtPointer) {
-                    Text("Screen area on the full primary display, in percent. Clicks its center. Wayland requires ydotool, /dev/uinput access, and GTK4; one monitor is supported.", style = MaterialTheme.typography.bodySmall)
-                    listOf("Left" to payload.left, "Top" to payload.top, "Width" to payload.width, "Height" to payload.height).forEachIndexed { index, (label, value) ->
-                        var text by rememberSaveable(current.id, current, key, action, index, editorRevision) { mutableStateOf(if (value.isFinite()) (value * 100).toString() else "") }
-                        OutlinedTextField(text, { raw ->
-                            text = raw
-                            val number = raw.toFloatOrNull()?.div(100f) ?: Float.NaN
-                            update(when (index) { 0 -> payload.copy(left = number); 1 -> payload.copy(top = number); 2 -> payload.copy(width = number); else -> payload.copy(height = number) })
-                        }, label = { Text("$label (%)") }, singleLine = true, isError = !payload.validFor(action), modifier = Modifier.fillMaxWidth())
-                    }
-                    if (!payload.validFor(action)) Text("Enter a positive area within 0–100%.", color = MaterialTheme.colorScheme.error)
-                    }
-                } else {
-                    Text("Keyboard input goes to the focused window. Wayland requires ydotool and access to /dev/uinput; check the diagnostic log for status.", style = MaterialTheme.typography.bodySmall)
-                    var keyMenu by remember { mutableStateOf(false) }
-                    Box {
-                        OutlinedButton(onClick = { keyMenu = true }) { Text("Key: ${payload.key?.name ?: "Select"} ▾") }
-                        DropdownMenu(expanded = keyMenu, onDismissRequest = { keyMenu = false }, modifier = Modifier.heightIn(max = 400.dp)) {
-                            PortableKey.entries.forEach { portableKey -> DropdownMenuItem(text = { Text(portableKey.name) }, onClick = { update(payload.copy(key = portableKey)); keyMenu = false }) }
+                when (action) {
+                    MappedTargetAction.SCREEN_CLICK -> {
+                        FilterChip(selected = payload.clickAtPointer, onClick = { update(payload.copy(clickAtPointer = !payload.clickAtPointer)) }, label = { Text("Click at current pointer") })
+                        if (!payload.clickAtPointer) {
+                            Text("Screen area on the full primary display, in percent. Clicks its center. Wayland requires ydotool, /dev/uinput access, and GTK4; one monitor is supported.", style = MaterialTheme.typography.bodySmall)
+                            AreaPercentFields(current.id, current, key, action, editorRevision, payload, ::update)
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        listOf("Ctrl" to payload.ctrl, "Alt" to payload.alt, "Shift" to payload.shift, "Meta" to payload.meta).forEachIndexed { index, (label, selected) ->
-                            FilterChip(selected = selected, onClick = { update(when (index) { 0 -> payload.copy(ctrl = !selected); 1 -> payload.copy(alt = !selected); 2 -> payload.copy(shift = !selected); else -> payload.copy(meta = !selected) }) }, label = { Text(label) })
+                    MappedTargetAction.KEYBOARD_INPUT -> {
+                        Text("Keyboard input goes to the focused window. Wayland requires ydotool and access to /dev/uinput; check the diagnostic log for status.", style = MaterialTheme.typography.bodySmall)
+                        var keyMenu by remember { mutableStateOf(false) }
+                        Box {
+                            OutlinedButton(onClick = { keyMenu = true }) { Text("Key: ${payload.key?.name ?: "Select"} ▾") }
+                            DropdownMenu(expanded = keyMenu, onDismissRequest = { keyMenu = false }, modifier = Modifier.heightIn(max = 400.dp)) {
+                                PortableKey.entries.forEach { portableKey -> DropdownMenuItem(text = { Text(portableKey.name) }, onClick = { update(payload.copy(key = portableKey)); keyMenu = false }) }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf("Ctrl" to payload.ctrl, "Alt" to payload.alt, "Shift" to payload.shift, "Meta" to payload.meta).forEachIndexed { index, (label, selected) ->
+                                FilterChip(selected = selected, onClick = { update(when (index) { 0 -> payload.copy(ctrl = !selected); 1 -> payload.copy(alt = !selected); 2 -> payload.copy(shift = !selected); else -> payload.copy(meta = !selected) }) }, label = { Text(label) })
+                            }
                         }
                     }
+                    MappedTargetAction.SCREEN_SCROLL -> {
+                        Text("Scrolls mouse wheel in the chosen direction. Hold repeat can stream continuous scrolling.", style = MaterialTheme.typography.bodySmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ScrollDirection.entries.forEach { dir ->
+                                FilterChip(selected = payload.scrollDirection == dir, onClick = { update(payload.copy(scrollDirection = dir)) }, label = { Text(dir.name) })
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { if (payload.scrollAmount > 1) update(payload.copy(scrollAmount = payload.scrollAmount - 1)) }, enabled = payload.scrollAmount > 1) { Text("-") }
+                            Text("Steps: ${payload.scrollAmount}", modifier = Modifier.padding(top = 10.dp))
+                            OutlinedButton(onClick = { if (payload.scrollAmount < 20) update(payload.copy(scrollAmount = payload.scrollAmount + 1)) }, enabled = payload.scrollAmount < 20) { Text("+") }
+                        }
+                        FilterChip(selected = payload.clickAtPointer, onClick = { update(payload.copy(clickAtPointer = !payload.clickAtPointer)) }, label = { Text("Scroll at current pointer") })
+                        if (!payload.clickAtPointer) {
+                            AreaPercentFields(current.id, current, key, action, editorRevision, payload, ::update)
+                        }
+                    }
+                    else -> Unit
+                }
+                if (press == PressType.SINGLE_CLICK) {
+                    FilterChip(
+                        selected = payload.repeatWhileHeld,
+                        onClick = { update(payload.copy(repeatWhileHeld = !payload.repeatWhileHeld)) },
+                        label = { Text("Repeat while held") }
+                    )
                 }
                 OutlinedButton(onClick = {
                     if (countdown > 0) { testJob?.cancel(); countdown = 0 }
@@ -173,6 +194,27 @@ fun PresetEditor(config: AppConfiguration, onChange: (AppConfiguration) -> Unit,
     }
     if (pendingSelection != null) AlertDialog(onDismissRequest = { pendingSelection = null }, title = { Text("Discard unsaved changes?") }, text = { Text("Your changes to ${current.name} have not been saved.") }, confirmButton = { TextButton(onClick = { onChange(config.copy(activePresetId = pendingSelection)); pendingSelection = null }) { Text("Discard") } }, dismissButton = { TextButton(onClick = { pendingSelection = null }) { Text("Keep editing") } })
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete ${current.name}?") }, text = { Text("This removes the saved preset.") }, confirmButton = { TextButton(onClick = { val remaining = config.presets.filterNot { it.id == current.id }; onChange(config.copy(presets = remaining, activePresetId = remaining.first().id)); confirmDelete = false }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
+}
+
+@Composable
+private fun AreaPercentFields(
+    presetId: String,
+    current: MappingPreset,
+    key: PresetBindingKey,
+    action: MappedTargetAction,
+    editorRevision: Int,
+    payload: InputConfig,
+    onUpdate: (InputConfig) -> Unit
+) {
+    listOf("Left" to payload.left, "Top" to payload.top, "Width" to payload.width, "Height" to payload.height).forEachIndexed { index, (label, value) ->
+        var text by rememberSaveable(presetId, current, key, action, index, editorRevision) { mutableStateOf(if (value.isFinite()) (value * 100).toString() else "") }
+        OutlinedTextField(text, { raw ->
+            text = raw
+            val number = raw.toFloatOrNull()?.div(100f) ?: Float.NaN
+            onUpdate(when (index) { 0 -> payload.copy(left = number); 1 -> payload.copy(top = number); 2 -> payload.copy(width = number); else -> payload.copy(height = number) })
+        }, label = { Text("$label (%)") }, singleLine = true, isError = !payload.validFor(action), modifier = Modifier.fillMaxWidth())
+    }
+    if (!payload.validFor(action)) Text("Enter a positive area within 0–100%.", color = MaterialTheme.colorScheme.error)
 }
 
 @Composable

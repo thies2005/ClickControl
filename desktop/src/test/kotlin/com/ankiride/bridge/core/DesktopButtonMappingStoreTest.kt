@@ -302,4 +302,9 @@ class DesktopButtonMappingStoreTest {
             assertEquals(PodAssignment.RIGHT_ANKI_LEFT_BIKE, ButtonMappingStore.loadConfiguration(file).podAssignment)
         } finally { file.delete() }
     }
+
+    @Test
+    fun defaultUbuntuAnkiConnectHostIsLocalhost() {
+        assertEquals("127.0.0.1", AppConfiguration().ubuntuAnkiConnectHost)
+    }
 }

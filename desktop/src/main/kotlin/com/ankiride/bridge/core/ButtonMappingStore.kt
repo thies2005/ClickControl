@@ -232,7 +232,7 @@ object ButtonMappingStore {
             floatingHudPillEnabled = props.getProperty(KEY_FLOATING_HUD, "false").toBoolean(),
             hapticFeedbackEnabled = props.getProperty(KEY_HAPTIC, "false").toBoolean(),
             audioFeedbackEnabled = props.getProperty(KEY_AUDIO, "false").toBoolean(),
-            ubuntuAnkiConnectHost = props.getProperty(KEY_UBUNTU_HOST, if (loadedFromFile) "192.168.1.100" else "127.0.0.1").trim(),
+            ubuntuAnkiConnectHost = props.getProperty(KEY_UBUNTU_HOST, "127.0.0.1").trim(),
             ubuntuAnkiConnectPort = props.getProperty(KEY_UBUNTU_PORT, "8765").toIntOrNull() ?: 8765,
             leftPodAutoReconnectSec = props.getProperty(KEY_LEFT_POD_RECONNECT, "55").toIntOrNull() ?: 55,
             openBikeServerPort = props.getProperty(KEY_OPENBIKE_PORT, "21587").toIntOrNull() ?: 21587,

@@ -73,8 +73,8 @@ object FloatingHudPill {
         bleState: BleConnectionState,
         mode: OperatingMode
     ) {
-        hide(service)
         val wm = service.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+        removeExistingOverlay(wm)
         val dm = DisplayMetrics()
         @Suppress("DEPRECATION")
         wm.defaultDisplay.getRealMetrics(dm)
@@ -207,14 +207,18 @@ object FloatingHudPill {
     fun hide(service: AccessibilityService) {
         mainHandler.post {
             val wm = service.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
-            pillContainer?.let { view ->
-                try {
-                    wm.removeView(view)
-                } catch (_: Exception) {
-                }
-            }
-            pillContainer = null
-            statusTextView = null
+            removeExistingOverlay(wm)
         }
+    }
+
+    private fun removeExistingOverlay(wm: WindowManager) {
+        pillContainer?.let { view ->
+            try {
+                wm.removeView(view)
+            } catch (_: Exception) {
+            }
+        }
+        pillContainer = null
+        statusTextView = null
     }
 }

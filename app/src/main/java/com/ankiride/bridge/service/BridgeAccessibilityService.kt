@@ -4,8 +4,10 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import com.ankiride.bridge.core.ButtonMappingStore
 import com.ankiride.bridge.core.DiagnosticLogger
 import com.ankiride.bridge.core.LogCategory
+import com.ankiride.bridge.ui.FloatingHudPill
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +31,8 @@ class BridgeAccessibilityService : AccessibilityService() {
         }
         activeInstance = this
         _isConnectedFlow.value = true
+        val cfg = ButtonMappingStore.loadFullConfiguration(this)
+        FloatingHudPill.syncVisibility(this, cfg.floatingHudPillEnabled, BridgeForegroundService.connectionStateFlow.value, cfg.mode)
         DiagnosticLogger.info(LogCategory.PERMS, "BridgeAccessibilityService connected and active")
     }
 

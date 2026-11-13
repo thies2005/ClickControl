@@ -209,11 +209,14 @@ async def setup_and_handshake(client: BleakClient, mac: str) -> bool:
 
 
 class ZwiftBleWorker:
-    def __init__(self, pinned_right: str = "", pinned_left: str = "", right_only: bool = True, legacy_shared: bool = False):
+    def __init__(self, pinned_right: str = "", pinned_left: str = "", right_only: bool = True, legacy_shared: bool = False, left_reconnect_sec: int = 55):
         self.pinned_right = pinned_right.strip().upper() if pinned_right else ""
         self.pinned_left = pinned_left.strip().upper() if pinned_left else ""
         self.right_only = right_only
         self.legacy_shared = legacy_shared
+        self.left_reconnect_sec = max(0, int(left_reconnect_sec))
+        self.left_connected_at = None
+        self.stop_task = None
         self.discovered_macs = set()
         self.reported_unknown = set()
         self.running = True
@@ -253,6 +256,23 @@ class ZwiftBleWorker:
 
         while self.running:
             try:
+                # Check left pod periodic reconnect watchdog
+                if not self.right_only and self.left_reconnect_sec > 0 and self.left_connected_at is not None:
+                    left_macs = [m for m, s in self.connected_sides.items() if s == "LEFT"]
+                    if left_macs and (time.monotonic() - self.left_connected_at) >= self.left_reconnect_sec:
+                        left_mac = left_macs[0]
+                        log("INFO", f"Left pod watchdog refreshing {left_mac} after {self.left_reconnect_sec}s")
+                        client = self.active_clients.pop(left_mac, None)
+                        self.connected_macs.discard(left_mac)
+                        self.connected_sides.pop(left_mac, None)
+                        self.left_connected_at = None
+                        if client is not None:
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
+                        emit_state("DISCONNECTED", left_mac)
+
                 # If right_only mode and we already have 1 connected pod, idle and monitor
                 if self.right_only and len(self.connected_macs) >= 1:
                     await asyncio.sleep(1.0)
@@ -384,19 +404,29 @@ class ZwiftBleWorker:
             self.update_connection_state(mac)
 
         try:
-            client = BleakClient(device, disconnected_callback=on_disconnect, timeout=10.0)
+            client = None
             connected = False
             for attempt in range(1, 3):
+                attempt_client = BleakClient(device, disconnected_callback=on_disconnect, timeout=10.0)
                 try:
-                    connected = await client.connect(timeout=10.0)
-                    if connected or client.is_connected:
+                    connected = await attempt_client.connect(timeout=10.0)
+                    if connected or attempt_client.is_connected:
+                        client = attempt_client
                         break
+                    try:
+                        await attempt_client.disconnect()
+                    except Exception:
+                        pass
                 except Exception as ce:
                     log("WARN", f"Connection attempt {attempt} to {mac} failed: {ce}")
+                    try:
+                        await attempt_client.disconnect()
+                    except Exception:
+                        pass
                 if attempt < 2:
                     await asyncio.sleep(0.4)
 
-            if not connected and not client.is_connected:
+            if client is None or (not connected and not client.is_connected):
                 log("WARN", f"Failed to connect to {mac}")
                 emit_state("DISCONNECTED", mac)
                 return
@@ -417,6 +447,8 @@ class ZwiftBleWorker:
 
             self.connected_macs.add(mac)
             self.connected_sides[mac] = side
+            if side == "LEFT":
+                self.left_connected_at = time.monotonic()
             emit_state("CONNECTED_" + side, mac)
             log("INFO", f"Handshake complete & subscribed to notifications on {mac}")
             self.update_connection_state(mac)
@@ -545,6 +577,7 @@ def main():
     parser.add_argument("--pinned-left", default="", help="Pinned MAC address for Left Pod")
     parser.add_argument("--right-only", default="true", help="Connect only to single/right pod (true/false)")
     parser.add_argument("--legacy-shared", default="false", help="Allow legacy shared controllers (true/false)")
+    parser.add_argument("--left-reconnect-sec", type=int, default=55, help="Periodic reconnect interval for left pod in seconds (0=disabled)")
     parser.add_argument("--scan-test", action="store_true", help="Run in scan-test mode (scan, connect, stream for duration, exit 0)")
     parser.add_argument("--duration", type=int, default=15, help="Duration for scan-test mode in seconds (default 15)")
     args = parser.parse_args()
@@ -555,7 +588,8 @@ def main():
         pinned_right=args.pinned_right,
         pinned_left=args.pinned_left,
         right_only=right_only_bool,
-        legacy_shared=args.legacy_shared.strip().lower() in ("true", "1", "yes")
+        legacy_shared=args.legacy_shared.strip().lower() in ("true", "1", "yes"),
+        left_reconnect_sec=args.left_reconnect_sec
     )
 
     loop = asyncio.new_event_loop()
@@ -566,7 +600,9 @@ def main():
         if args.scan_test:
             sys.exit(0)
         else:
-            asyncio.create_task(worker.stop())
+            worker.running = False
+            if worker.stop_task is None or worker.stop_task.done():
+                worker.stop_task = loop.create_task(worker.stop())
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -584,6 +620,11 @@ def main():
         if not args.scan_test:
             loop.run_until_complete(worker.stop())
     finally:
+        if not args.scan_test and worker.stop_task is not None and not worker.stop_task.done():
+            try:
+                loop.run_until_complete(worker.stop_task)
+            except Exception:
+                pass
         loop.close()
 
 

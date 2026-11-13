@@ -26,4 +26,26 @@ class GenericRouterTest {
         router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_DOWN_LEFT_ALT, PressType.SINGLE_CLICK))
         assertEquals(listOf(payload), calls)
     }
+
+    @Test fun screenScrollRoutesWithConfig() = runTest {
+        val key = PresetBindingKey(ClickButton.Y, PressType.SINGLE_CLICK)
+        val scrollPayload = InputConfig(scrollDirection = ScrollDirection.DOWN, scrollAmount = 4, clickAtPointer = true)
+        val preset = MappingPreset("p", "ScrollPreset", AnkiTarget.ANKICONNECT, mapOf(key to MappedTargetAction.SCREEN_SCROLL), mapOf(key to scrollPayload))
+        val dispatched = mutableListOf<Pair<MappedTargetAction, InputConfig>>()
+        val router = DesktopActionRouter(
+            scope = this,
+            configSupplier = { AppConfiguration(presets = listOf(preset), activePresetId = "p") },
+            ankiDispatcher = object : AnkiActionDispatcher { override fun dispatch(action: AnkiAction) = true },
+            myWhooshDispatcher = object : MyWhooshActionDispatcher { override suspend fun dispatch(action: MyWhooshAction, config: AppConfiguration) = true },
+            routingEnabled = { true },
+            genericInputDispatcher = object : GenericInputDispatcher {
+                override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean {
+                    dispatched.add(action to config)
+                    return true
+                }
+            }
+        )
+        router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.SINGLE_CLICK))
+        assertEquals(listOf(MappedTargetAction.SCREEN_SCROLL to scrollPayload), dispatched)
+    }
 }
