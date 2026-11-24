@@ -15,43 +15,45 @@ class ActionRouter(
     private val routingEnabled: () -> Boolean = { true },
     private val genericInputDispatcher: GenericInputDispatcher = AndroidGenericInputDispatcher
 ) {
+    private val capabilities = PlatformCapabilities.android()
 
     fun routeGesture(event: ButtonGestureEvent) {
         if (!routingEnabled()) return
         val config = configSupplier()
-        val target = PresetStore.resolve(config, event.button, event.type) ?: ButtonMappingStore.resolveAction(
-            mode = config.mode,
-            button = event.button,
-            pressType = event.type,
-            customBindings = config.customBindings,
-            rightPodOnlyNoZwift = config.rightPodOnlyNoZwift,
-            useZForShiftDownInSinglePodMode = config.useZForShiftDownInSinglePodMode,
-            podAssignment = config.podAssignment
-        )
+        val activePreset = PresetStore.active(config)
+        val target = PresetStore.resolve(config, event.button, event.type) ?: MappedTargetAction.NONE
 
+        val scopeLabel = activePreset?.name ?: "Default"
         DiagnosticLogger.info(
             LogCategory.ROUTER,
-            "[${config.mode.shortTitle}] ${event.button.displayName} (${event.type.name}) -> ${target.label}"
+            "[$scopeLabel] ${event.button.displayName} (${event.type.name}) -> ${target.displayLabel(PlatformKind.ANDROID)}"
         )
 
         if (context != null) {
             FeedbackCueManager.triggerCue(context, target, config)
         }
 
+        val actionText = activePreset?.let {
+            PresetStore.bindingLabel(it, PresetBindingKey(event.button.canonicalButton, event.type), PlatformKind.ANDROID)
+        } ?: target.displayLabel(PlatformKind.ANDROID)
+
         FloatingHudPill.notifyActionDispatched(
             service = BridgeAccessibilityService.activeInstance,
             enabled = config.floatingHudPillEnabled,
             bleState = BridgeForegroundService.connectionStateFlow.value,
-            mode = config.mode,
-            actionText = PresetStore.active(config)?.let { PresetStore.bindingLabel(it, PresetBindingKey(event.button.canonicalButton, event.type)) } ?: target.label
+            presetName = activePreset?.name ?: "Default",
+            ankiTarget = activePreset?.ankiTarget ?: AnkiTarget.ANKIDROID,
+            actionText = actionText
         )
 
         if (target.isGenericInput) {
             val key = PresetBindingKey(event.button.canonicalButton, event.type)
-            val payload = PresetStore.active(config)?.inputConfigs?.get(key)
+            val payload = activePreset?.inputConfigs?.get(key)
             synchronized(AndroidGenericInputDispatcher.routingLock) {
-                if (!routingEnabled() || payload == null || !payload.validFor(target) || !genericInputDispatcher.dispatch(target, payload)) {
-                    DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input is not configured or unavailable")
+                if (!routingEnabled() || payload == null || !capabilities.isValidInputConfig(target, payload) ||
+                    !genericInputDispatcher.dispatch(target, payload, event.isRepeat, event.button.canonicalButton)
+                ) {
+                    DiagnosticLogger.warn(LogCategory.ROUTER, "Touch action is not configured or Accessibility Service is off")
                 }
             }
         }

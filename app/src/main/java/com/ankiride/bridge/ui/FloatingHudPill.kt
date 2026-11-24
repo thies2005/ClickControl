@@ -16,9 +16,11 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.ankiride.bridge.anki.AnkiContentProviderHelper
+import com.ankiride.bridge.core.AnkiTarget
 import com.ankiride.bridge.core.BleConnectionState
 import com.ankiride.bridge.core.ButtonMappingStore
-import com.ankiride.bridge.core.OperatingMode
+import com.ankiride.bridge.core.MyWhooshLocation
+import com.ankiride.bridge.core.PresetStore
 import com.ankiride.bridge.mywhoosh.MyShiftOverlayCalibrator
 import com.ankiride.bridge.service.BridgeForegroundService
 import kotlin.math.abs
@@ -34,7 +36,8 @@ object FloatingHudPill {
         service: AccessibilityService?,
         enabled: Boolean,
         bleState: BleConnectionState,
-        mode: OperatingMode
+        presetName: String,
+        ankiTarget: AnkiTarget
     ) {
         if (service == null || !enabled) {
             if (service != null) hide(service)
@@ -42,9 +45,9 @@ object FloatingHudPill {
         }
         mainHandler.post {
             if (pillContainer == null) {
-                show(service, bleState, mode)
+                show(service, bleState, presetName, ankiTarget)
             } else {
-                updateText(service, bleState, mode, lastActionLabel)
+                updateText(service, bleState, presetName, ankiTarget, lastActionLabel)
             }
         }
     }
@@ -53,16 +56,17 @@ object FloatingHudPill {
         service: AccessibilityService?,
         enabled: Boolean,
         bleState: BleConnectionState,
-        mode: OperatingMode,
+        presetName: String,
+        ankiTarget: AnkiTarget,
         actionText: String
     ) {
         lastActionLabel = actionText
         if (service == null || !enabled) return
         mainHandler.post {
             if (pillContainer == null) {
-                show(service, bleState, mode)
+                show(service, bleState, presetName, ankiTarget)
             } else {
-                updateText(service, bleState, mode, actionText)
+                updateText(service, bleState, presetName, ankiTarget, actionText)
             }
         }
     }
@@ -71,7 +75,8 @@ object FloatingHudPill {
     private fun show(
         service: AccessibilityService,
         bleState: BleConnectionState,
-        mode: OperatingMode
+        presetName: String,
+        ankiTarget: AnkiTarget
     ) {
         val wm = service.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
         removeExistingOverlay(wm)
@@ -100,15 +105,17 @@ object FloatingHudPill {
         statusTextView = infoTv
         layout.addView(infoTv)
 
-        val calibrateTv = TextView(service).apply {
-            text = "  🎯"
-            textSize = 13f
-            setOnClickListener {
-                val cfg = ButtonMappingStore.loadFullConfiguration(service)
-                MyShiftOverlayCalibrator.showCalibrationOverlay(service, cfg.mode)
+        val initialCfg = ButtonMappingStore.loadFullConfiguration(service)
+        if (initialCfg.myWhooshLocation == MyWhooshLocation.ON_THIS_DEVICE && initialCfg.useMyShiftTouchFallbackWhenNoClient) {
+            val calibrateTv = TextView(service).apply {
+                text = "  🎯"
+                textSize = 13f
+                setOnClickListener {
+                    MyShiftOverlayCalibrator.showCalibrationOverlay(service)
+                }
             }
+            layout.addView(calibrateTv)
         }
-        layout.addView(calibrateTv)
 
         val closeTv = TextView(service).apply {
             text = "  ✕"
@@ -130,7 +137,7 @@ object FloatingHudPill {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (dm.widthPixels * 0.38f).roundToInt()
+            x = (dm.widthPixels * 0.35f).roundToInt()
             y = (18 * dm.density).roundToInt()
         }
 
@@ -161,14 +168,16 @@ object FloatingHudPill {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragged) {
-                        // Tap pill body to cycle OperatingMode on the fly
                         val curCfg = ButtonMappingStore.loadFullConfiguration(service)
-                        val modes = OperatingMode.entries
-                        val nextMode = modes[(modes.indexOf(curCfg.mode) + 1) % modes.size]
-                        val updated = curCfg.copy(mode = nextMode)
-                        ButtonMappingStore.saveFullConfiguration(service, updated)
-                        BridgeForegroundService.startService(service, updated)
-                        updateText(service, bleState, nextMode, "Mode -> ${nextMode.shortTitle}")
+                        val presets = curCfg.presets
+                        if (presets.size > 1) {
+                            val currentIdx = presets.indexOfFirst { it.id == curCfg.activePresetId }.coerceAtLeast(0)
+                            val nextPreset = presets[(currentIdx + 1) % presets.size]
+                            val updated = curCfg.copy(activePresetId = nextPreset.id)
+                            ButtonMappingStore.saveFullConfiguration(service, updated)
+                            BridgeForegroundService.startService(service, updated)
+                            updateText(service, bleState, nextPreset.name, nextPreset.ankiTarget, "Preset -> ${nextPreset.name}")
+                        }
                     }
                     true
                 }
@@ -179,7 +188,7 @@ object FloatingHudPill {
         try {
             wm.addView(layout, lp)
             pillContainer = layout
-            updateText(service, bleState, mode, lastActionLabel)
+            updateText(service, bleState, presetName, ankiTarget, lastActionLabel)
         } catch (_: Exception) {
         }
     }
@@ -187,21 +196,30 @@ object FloatingHudPill {
     private fun updateText(
         service: AccessibilityService,
         bleState: BleConnectionState,
-        mode: OperatingMode,
+        presetName: String,
+        ankiTarget: AnkiTarget,
         actionLabel: String
     ) {
         val dot = when (bleState) {
-            BleConnectionState.CONNECTED_RIGHT_ONLY, BleConnectionState.CONNECTED_BOTH_PODS -> "🟢"
-            BleConnectionState.SCANNING, BleConnectionState.CONNECTING, BleConnectionState.HANDSHAKING -> "🟡"
+            BleConnectionState.CONNECTED_RIGHT_ONLY,
+            BleConnectionState.CONNECTED_LEFT_ONLY,
+            BleConnectionState.CONNECTED_BOTH_PODS -> "🟢"
+            BleConnectionState.SCANNING,
+            BleConnectionState.CONNECTING,
+            BleConnectionState.HANDSHAKING -> "🟡"
             else -> "🔴"
         }
-        val dueTotal = try {
-            AnkiContentProviderHelper.queryReviewInfo(service).sumOf { it.totalDue }
-        } catch (_: Exception) {
+        val dueTotal = if (ankiTarget == AnkiTarget.ANKIDROID) {
+            try {
+                AnkiContentProviderHelper.queryReviewInfo(service).sumOf { it.totalDue }
+            } catch (_: Exception) {
+                0
+            }
+        } else {
             0
         }
         val dueSuffix = if (dueTotal > 0) " • Due:$dueTotal" else ""
-        statusTextView?.text = "$dot ${mode.shortTitle}$dueSuffix • $actionLabel"
+        statusTextView?.text = "$dot ${presetName.ifBlank { "Default" }}$dueSuffix • $actionLabel"
     }
 
     fun hide(service: AccessibilityService) {

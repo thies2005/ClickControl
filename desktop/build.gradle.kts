@@ -22,6 +22,7 @@ tasks.test {
 }
 
 dependencies {
+    implementation(project(":core"))
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
     implementation(compose.materialIconsExtended)
@@ -62,6 +63,7 @@ compose.desktop {
             )
 
             linux {
+                iconFile.set(project.file("src/main/resources/icons/clickcontrol.png"))
                 shortcut = true
                 menuGroup = "Utility"
                 debMaintainer = "ankiride@example.com"

@@ -85,4 +85,78 @@ class GenericInputTest {
         performInput(areaDriver, MappedTargetAction.SCREEN_SCROLL, InputConfig(left = .2f, top = .1f, width = .4f, height = .2f, scrollDirection = ScrollDirection.LEFT, scrollAmount = 2, clickAtPointer = false), Rectangle(10, 20, 101, 201))
         assertEquals(listOf("move:50,60", "wheel:-2,0"), areaDriver.calls)
     }
+
+    @Test fun repeatTicksAreCoalescedWhileInFlight() = kotlinx.coroutines.test.runTest {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val calls = mutableListOf<PortableKey?>()
+        val queue = OrderedInputQueue(backgroundScope) { _, config, _ ->
+            calls.add(config.key)
+            if (config.key == PortableKey.A) { entered.complete(Unit); release.await() }
+        }
+        queue.enqueue(MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.A), isRepeat = false)
+        entered.await()
+        // While A is in flight, repeat ticks are dropped instead of building a runaway backlog
+        assertTrue(queue.enqueue(MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.B), isRepeat = true))
+        assertTrue(queue.enqueue(MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.C), isRepeat = true))
+        // Non-repeat action still queues normally
+        assertTrue(queue.enqueue(MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.D), isRepeat = false))
+        release.complete(Unit)
+        testScheduler.runCurrent()
+        assertEquals(listOf(PortableKey.A, PortableKey.D), calls)
+    }
+
+    @Test fun releaseCancelsOnlyRepeatsForReleasedButtonWithoutDroppingInitialOrOtherButtons() = kotlinx.coroutines.test.runTest {
+        val initialStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val initialRelease = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val repeatStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val repeatRelease = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val events = mutableListOf<String>()
+        var repeatWasValidAfterCancel = true
+
+        val queue = OrderedInputQueue(backgroundScope) { _, config, valid ->
+            when {
+                config.scrollDirection == ScrollDirection.DOWN && !config.repeatWhileHeld -> {
+                    initialStarted.complete(Unit)
+                    initialRelease.await()
+                    if (valid()) events.add("DOWN_INITIAL")
+                }
+                config.scrollDirection == ScrollDirection.DOWN && config.repeatWhileHeld -> {
+                    repeatStarted.complete(Unit)
+                    repeatRelease.await()
+                    repeatWasValidAfterCancel = valid()
+                    if (valid()) events.add("DOWN_REPEAT")
+                }
+                config.scrollDirection == ScrollDirection.LEFT -> {
+                    if (valid()) events.add("LEFT_INITIAL")
+                }
+                config.scrollDirection == ScrollDirection.UP -> {
+                    if (valid()) events.add("UP_REPEAT")
+                }
+            }
+        }
+
+        // 1. User taps DOWN (initial isRepeat=false) and quickly releases DOWN while initial scroll is executing.
+        queue.enqueue(MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.DOWN, repeatWhileHeld = false, clickAtPointer = true), isRepeat = false, sourceButton = ClickButton.DOWN)
+        initialStarted.await()
+        queue.enqueue(MappedTargetAction.KEYBOARD_INPUT, InputConfig(scrollDirection = ScrollDirection.LEFT, key = PortableKey.LEFT), isRepeat = false, sourceButton = ClickButton.LEFT)
+        queue.cancelPendingRepeats(ClickButton.DOWN)
+        initialRelease.complete(Unit)
+        testScheduler.runCurrent()
+
+        assertEquals(listOf("DOWN_INITIAL", "LEFT_INITIAL"), events)
+
+        // 2. User holds DOWN until repeat tick starts in flight, then releases DOWN -> invalidates DOWN repeat only.
+        queue.enqueue(MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.DOWN, repeatWhileHeld = true, clickAtPointer = true), isRepeat = true, sourceButton = ClickButton.DOWN)
+        repeatStarted.await()
+        queue.cancelPendingRepeats(ClickButton.DOWN)
+        repeatRelease.complete(Unit)
+        testScheduler.runCurrent()
+
+        assertFalse(repeatWasValidAfterCancel)
+        // Subsequent UP repeat runs unaffected.
+        queue.enqueue(MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.UP, repeatWhileHeld = true, clickAtPointer = true), isRepeat = true, sourceButton = ClickButton.UP)
+        testScheduler.runCurrent()
+        assertEquals(listOf("DOWN_INITIAL", "LEFT_INITIAL", "UP_REPEAT"), events)
+    }
 }

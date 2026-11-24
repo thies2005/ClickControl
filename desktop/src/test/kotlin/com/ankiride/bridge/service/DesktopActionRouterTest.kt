@@ -1,24 +1,9 @@
 package com.ankiride.bridge.service
 
 import com.ankiride.bridge.ble.DesktopZwiftBleController
-import com.ankiride.bridge.core.AnkiAction
-import com.ankiride.bridge.core.AnkiActionDispatcher
-import com.ankiride.bridge.core.AppConfiguration
-import com.ankiride.bridge.core.ButtonMappingStore
-import com.ankiride.bridge.core.ButtonGestureEvent
-import com.ankiride.bridge.core.ClickButton
-import com.ankiride.bridge.core.DiagnosticLogger
-import com.ankiride.bridge.core.LogCategory
-import com.ankiride.bridge.core.MappedTargetAction
-import com.ankiride.bridge.core.ModeButtonBindingKey
-import com.ankiride.bridge.core.MyWhooshAction
-import com.ankiride.bridge.core.MyWhooshActionDispatcher
-import com.ankiride.bridge.core.OperatingMode
-import com.ankiride.bridge.core.PodAssignment
-import com.ankiride.bridge.core.PressType
+import com.ankiride.bridge.core.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -46,6 +31,7 @@ class DesktopActionRouterTest {
 
     private lateinit var ankiDispatcher: FakeAnkiDispatcher
     private lateinit var myWhooshDispatcher: FakeMyWhooshDispatcher
+    private val caps = PlatformCapabilities.desktop()
 
     @Before
     fun setUp() {
@@ -55,8 +41,9 @@ class DesktopActionRouterTest {
     }
 
     @Test
-    fun testMode1TabletSplitScreenRouting() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, mode = OperatingMode.MODE_1_TABLET_SPLIT_SCREEN)
+    fun testRideAndAnkiPresetRouting() = runTest {
+        val preset = PresetStore.createFromTemplate(PresetTemplate.RIDE_AND_ANKI, caps)
+        val config = AppConfiguration(presets = listOf(preset), activePresetId = preset.id)
         val router = DesktopActionRouter(
             scope = this,
             configSupplier = { config },
@@ -66,20 +53,17 @@ class DesktopActionRouterTest {
 
         assertEquals("Ready", router.lastRoutedActionLabel.value)
 
-        // Shifting
-        router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
+        router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_UP_LEFT, PressType.SINGLE_CLICK))
         assertEquals(MappedTargetAction.MW_SHIFT_UP.label, router.lastRoutedActionLabel.value)
 
-        router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.SINGLE_CLICK))
+        router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_DOWN_LEFT, PressType.SINGLE_CLICK))
         assertEquals(MappedTargetAction.MW_SHIFT_DOWN.label, router.lastRoutedActionLabel.value)
 
-        // Anki
         router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.LONG_PRESS))
         router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.LONG_PRESS))
 
-        // Left Pod D-Pad
         router.routeGesture(ButtonGestureEvent(ClickButton.LEFT, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.RIGHT, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.UP, PressType.SINGLE_CLICK))
@@ -98,7 +82,6 @@ class DesktopActionRouterTest {
             ),
             myWhooshDispatcher.dispatchedActions
         )
-
         assertEquals(
             listOf(
                 AnkiAction.FLIP_OR_AGAIN,
@@ -110,34 +93,13 @@ class DesktopActionRouterTest {
         )
 
         val logs = DiagnosticLogger.logs.value.filter { it.category == LogCategory.ROUTER }
-        assertTrue(logs.any { it.message.contains("[Split-Screen]") })
+        assertTrue(logs.any { it.message.contains("[Ride + Anki]") })
     }
 
     @Test
-    fun testMode2TabletAnkiPhoneMyWhooshRouting() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, mode = OperatingMode.MODE_2_TABLET_ANKI_PHONE_MYWHOOSH)
-        val router = DesktopActionRouter(
-            scope = this,
-            configSupplier = { config },
-            ankiDispatcher = ankiDispatcher,
-            myWhooshDispatcher = myWhooshDispatcher
-        )
-
-        router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
-
-        testScheduler.advanceUntilIdle()
-
-        assertEquals(listOf(MyWhooshAction.SHIFT_UP), myWhooshDispatcher.dispatchedActions)
-        assertEquals(listOf(AnkiAction.FLIP_OR_GOOD), ankiDispatcher.dispatchedActions)
-
-        val logs = DiagnosticLogger.logs.value.filter { it.category == LogCategory.ROUTER }
-        assertTrue(logs.any { it.message.contains("[Tablet + Phone]") })
-    }
-
-    @Test
-    fun testMode3AnkiOnlyRouting() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, mode = OperatingMode.MODE_3_ANKI_ONLY)
+    fun testAnkiPresetRoutingDispatchesOnlyAnki() = runTest {
+        val preset = PresetStore.createFromTemplate(PresetTemplate.ANKI_LOCAL, caps)
+        val config = AppConfiguration(presets = listOf(preset), activePresetId = preset.id)
         val router = DesktopActionRouter(
             scope = this,
             configSupplier = { config },
@@ -147,28 +109,22 @@ class DesktopActionRouterTest {
 
         router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.LONG_PRESS))
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.LONG_PRESS))
         router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.LONG_PRESS))
         router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.LONG_PRESS))
         router.routeGesture(ButtonGestureEvent(ClickButton.LEFT, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.RIGHT, PressType.SINGLE_CLICK))
 
         testScheduler.advanceUntilIdle()
 
-        assertTrue("Mode 3 must not dispatch to MyWhoosh", myWhooshDispatcher.dispatchedActions.isEmpty())
+        assertTrue("Anki-only preset must not dispatch to MyWhoosh", myWhooshDispatcher.dispatchedActions.isEmpty())
         assertEquals(
             listOf(
                 AnkiAction.FLIP_OR_GOOD,
                 AnkiAction.FLIP_OR_EASY,
-                AnkiAction.FLIP_OR_GOOD,
-                AnkiAction.UNDO,
                 AnkiAction.FLIP_OR_AGAIN,
                 AnkiAction.UNDO,
                 AnkiAction.FLIP_OR_HARD,
-                AnkiAction.UNDO,
                 AnkiAction.UNDO,
                 AnkiAction.FLIP_CARD
             ),
@@ -177,128 +133,52 @@ class DesktopActionRouterTest {
     }
 
     @Test
-    fun testMode4MyWhooshOnlyRouting() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, mode = OperatingMode.MODE_4_MYWHOOSH_ONLY)
+    fun testOptionBRideWebSlidesPresetRoutesScrollKeysAndMyWhooshShiftsCleanly() = runTest {
+        val preset = PresetStore.createFromTemplate(PresetTemplate.RIDE_WEB_SLIDES, caps)
+        val config = AppConfiguration(
+            presets = listOf(preset),
+            activePresetId = preset.id,
+            podAssignment = PodAssignment.BOTH_CONTROLLERS
+        )
+        val genericDispatched = mutableListOf<Pair<MappedTargetAction, InputConfig>>()
         val router = DesktopActionRouter(
             scope = this,
             configSupplier = { config },
             ankiDispatcher = ankiDispatcher,
-            myWhooshDispatcher = myWhooshDispatcher
+            myWhooshDispatcher = myWhooshDispatcher,
+            genericInputDispatcher = object : GenericInputDispatcher {
+                override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean {
+                    genericDispatched.add(action to config)
+                    return true
+                }
+            }
         )
 
-        router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_UP_RIGHT, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_DOWN_LEFT, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.LEFT, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.RIGHT, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.UP, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.DOWN, PressType.SINGLE_CLICK))
-
-        testScheduler.advanceUntilIdle()
-
-        assertTrue("Mode 4 must not dispatch to Anki", ankiDispatcher.dispatchedActions.isEmpty())
-        assertEquals(
-            listOf(
-                MyWhooshAction.SHIFT_UP,
-                MyWhooshAction.SHIFT_DOWN,
-                MyWhooshAction.SHIFT_UP,
-                MyWhooshAction.SHIFT_DOWN,
-                MyWhooshAction.STEER_LEFT,
-                MyWhooshAction.STEER_RIGHT,
-                MyWhooshAction.STEER_LEFT,
-                MyWhooshAction.STEER_RIGHT,
-                MyWhooshAction.TOGGLE_CAMERA,
-                MyWhooshAction.EMOTE
-            ),
-            myWhooshDispatcher.dispatchedActions
-        )
-    }
-
-    @Test
-    fun testMode5UbuntuAnkiConnectRouting() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, mode = OperatingMode.MODE_5_UBUNTU_ANKICONNECT)
-        val router = DesktopActionRouter(
-            scope = this,
-            configSupplier = { config },
-            ankiDispatcher = ankiDispatcher,
-            myWhooshDispatcher = myWhooshDispatcher
-        )
-
+        router.routeGesture(ButtonGestureEvent(ClickButton.LEFT, PressType.SINGLE_CLICK))
+        router.routeGesture(ButtonGestureEvent(ClickButton.RIGHT, PressType.LONG_PRESS))
+        router.routeGesture(ButtonGestureEvent(ClickButton.SHIFT_UP_RIGHT, PressType.SINGLE_CLICK))
         router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.Y, PressType.SINGLE_CLICK))
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
 
         testScheduler.advanceUntilIdle()
 
-        assertEquals(
-            listOf(MyWhooshAction.SHIFT_UP, MyWhooshAction.SHIFT_DOWN),
-            myWhooshDispatcher.dispatchedActions
-        )
-        assertEquals(
-            listOf(AnkiAction.FLIP_OR_AGAIN, AnkiAction.FLIP_OR_GOOD),
-            ankiDispatcher.dispatchedActions
-        )
-
-        val logs = DiagnosticLogger.logs.value.filter { it.category == LogCategory.ROUTER }
-        assertTrue(logs.any { it.message.contains("[Ubuntu Anki + Ride]") })
-    }
-
-    @Test
-    fun testCustomBindingsOverrideAndDisabledTarget() = runTest {
-        val customBindings = mapOf(
-            ModeButtonBindingKey(
-                OperatingMode.MODE_1_TABLET_SPLIT_SCREEN,
-                ClickButton.B,
-                PressType.SINGLE_CLICK
-            ) to MappedTargetAction.MW_CAMERA,
-            ModeButtonBindingKey(
-                OperatingMode.MODE_1_TABLET_SPLIT_SCREEN,
-                ClickButton.A,
-                PressType.SINGLE_CLICK
-            ) to MappedTargetAction.NONE
-        )
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false,
-            mode = OperatingMode.MODE_1_TABLET_SPLIT_SCREEN,
-            customBindings = customBindings
-        )
-        val router = DesktopActionRouter(
-            scope = this,
-            configSupplier = { config },
-            ankiDispatcher = ankiDispatcher,
-            myWhooshDispatcher = myWhooshDispatcher
-        )
-
-        // Custom override: B -> MyWhoosh TOGGLE_CAMERA
-        router.routeGesture(ButtonGestureEvent(ClickButton.B, PressType.SINGLE_CLICK))
-        assertEquals(MappedTargetAction.MW_CAMERA.label, router.lastRoutedActionLabel.value)
-
-        // Custom override: A -> NONE (disabled)
-        router.routeGesture(ButtonGestureEvent(ClickButton.A, PressType.SINGLE_CLICK))
-        assertEquals(MappedTargetAction.NONE.label, router.lastRoutedActionLabel.value)
-
-        testScheduler.advanceUntilIdle()
-
-        assertEquals(listOf(MyWhooshAction.TOGGLE_CAMERA), myWhooshDispatcher.dispatchedActions)
         assertTrue(ankiDispatcher.dispatchedActions.isEmpty())
+        assertEquals(listOf(MyWhooshAction.SHIFT_UP, MyWhooshAction.SHIFT_DOWN), myWhooshDispatcher.dispatchedActions)
+        assertEquals(3, genericDispatched.size)
+        assertEquals(ScrollDirection.DOWN, genericDispatched[0].second.scrollDirection)
+        assertEquals(PortableKey.LEFT, genericDispatched[1].second.key)
+        assertEquals(PortableKey.PAGE_DOWN, genericDispatched[2].second.key)
     }
 
     @Test
     fun testFeedbackCueManagerAudioEnabledAndDisabled() {
-        val configAudioDisabled = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, audioFeedbackEnabled = false)
-        val configAudioEnabled = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false, audioFeedbackEnabled = true)
+        val configAudioDisabled = AppConfiguration(audioFeedbackEnabled = false)
+        val configAudioEnabled = AppConfiguration(audioFeedbackEnabled = true)
 
-        // NONE action should never trigger audio
         DesktopFeedbackCueManager.triggerCue(MappedTargetAction.NONE, configAudioEnabled)
-
-        // Disabled audio config should return early
         DesktopFeedbackCueManager.triggerCue(MappedTargetAction.MW_SHIFT_UP, configAudioDisabled)
 
-        // Enabled audio config triggers tone generation for all sound types without exception
-        val targetsToTest = listOf(
+        listOf(
             MappedTargetAction.MW_SHIFT_UP,
             MappedTargetAction.MW_SHIFT_DOWN,
             MappedTargetAction.ANKI_UNDO,
@@ -306,17 +186,18 @@ class DesktopActionRouterTest {
             MappedTargetAction.ANKI_FLIP_OR_GOOD,
             MappedTargetAction.ANKI_FLIP_OR_HARD,
             MappedTargetAction.MW_CAMERA
-        )
-        for (target in targetsToTest) {
+        ).forEach { target ->
             DesktopFeedbackCueManager.triggerCue(target, configAudioEnabled)
         }
     }
 
     @Test
     fun testEndToEndControllerToRouterDiagnosticPipeline() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = false,
-            mode = OperatingMode.MODE_5_UBUNTU_ANKICONNECT,
-            rightPodOnlyNoZwift = true
+        val ankiPreset = PresetStore.createFromTemplate(PresetTemplate.ANKI_LOCAL, caps)
+        val config = AppConfiguration(
+            presets = listOf(ankiPreset),
+            activePresetId = ankiPreset.id,
+            podAssignment = PodAssignment.SINGLE_CONTROLLER
         )
         val controller = DesktopZwiftBleController(scope = this)
         val router = DesktopActionRouter(
@@ -331,61 +212,25 @@ class DesktopActionRouterTest {
             }
         }
 
-        val mac = "F4:C4:59:0C:6F:29"
-
-        // 1. Worker connects
+        val mac = "02:00:00:00:00:01"
         val parseWorkerLineMethod = DesktopZwiftBleController::class.java.getDeclaredMethod("parseWorkerLine", String::class.java)
         parseWorkerLineMethod.isAccessible = true
         parseWorkerLineMethod.invoke(controller, "STATE CONNECTED_RIGHT_ONLY $mac")
 
-        // 2. Physical button press: Z pressed at t=1000ms
-        val packetZPress = byteArrayOf(
-            0x23, 0x08, 0xFF.toByte(), 0xFE.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x0F
-        )
+        val packetZPress = byteArrayOf(0x23, 0x08, 0xFF.toByte(), 0xFE.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x0F)
         controller.handleRawNotification(mac, packetZPress, nowMs = 1000L)
 
-        // 3. Physical button release: Z released at t=1100ms (< 450ms -> SINGLE_CLICK)
-        val packetAllReleased = byteArrayOf(
-            0x23, 0x08, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x0F
-        )
+        val packetAllReleased = byteArrayOf(0x23, 0x08, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x0F)
         controller.handleRawNotification(mac, packetAllReleased, nowMs = 1100L)
 
         testScheduler.advanceUntilIdle()
 
-        // Check diagnostic logs
         val logs = DiagnosticLogger.logs.value
-        val bleLogs = logs.filter { it.category == LogCategory.BLE }
-        val packetLogs = logs.filter { it.category == LogCategory.PACKET }
-        val routerLogs = logs.filter { it.category == LogCategory.ROUTER }
-
-        assertTrue("Must contain BLE connection log", bleLogs.any { it.message.contains("Connected to Right Pod") })
-        assertTrue("Must contain PACKET log", packetLogs.any { it.message.contains("0x23 packet from $mac") })
-        assertTrue("Must contain ROUTER action log", routerLogs.any { it.message.contains("->") })
+        assertTrue(logs.any { it.category == LogCategory.BLE && it.message.contains("Connected to Right Pod") })
+        assertTrue(logs.any { it.category == LogCategory.PACKET && it.message.contains("0x23 packet from $mac") })
+        assertTrue(logs.any { it.category == LogCategory.ROUTER && it.message.contains("->") })
 
         collectJob.cancel()
         controller.disconnect()
-    }
-    @Test
-    fun assignmentsKeepActionsOnTheirOwnSide() = runTest {
-        val router = DesktopActionRouter(scope = this, configSupplier = { AppConfiguration() },
-            ankiDispatcher = ankiDispatcher, myWhooshDispatcher = myWhooshDispatcher)
-        for (button in ClickButton.entries) for (press in PressType.entries) {
-            val only = ButtonMappingStore.assignedAction(PodAssignment.RIGHT_ANKI_ONLY, button, press)
-            assertTrue(only.myWhooshAction == null)
-            if (!button.isRightPod) assertEquals(MappedTargetAction.NONE, only)
-            val dual = ButtonMappingStore.assignedAction(PodAssignment.RIGHT_ANKI_LEFT_BIKE, button, press)
-            if (button.isRightPod) assertTrue(dual.myWhooshAction == null)
-            else assertTrue(dual.ankiAction == null)
-        }
-        assertEquals(MappedTargetAction.ANKI_FLIP_OR_AGAIN, ButtonMappingStore.assignedAction(PodAssignment.RIGHT_ANKI_ONLY, ClickButton.SHIFT_DOWN_RIGHT, PressType.SINGLE_CLICK))
-        assertEquals(MappedTargetAction.ANKI_UNDO, ButtonMappingStore.assignedAction(PodAssignment.RIGHT_ANKI_ONLY, ClickButton.SHIFT_DOWN_RIGHT, PressType.LONG_PRESS))
-        assertEquals(MappedTargetAction.MW_SHIFT_UP, ButtonMappingStore.assignedAction(PodAssignment.RIGHT_ANKI_LEFT_BIKE, ClickButton.SHIFT_UP_LEFT, PressType.SINGLE_CLICK))
-    }
-    @Test
-    fun legacySinglePodZOverrideIsHonored() = runTest {
-        val config = AppConfiguration(podAssignment = PodAssignment.LEGACY_SHARED, useZForShiftDownInSinglePodMode = true)
-        val router = DesktopActionRouter(scope = this, configSupplier = { config }, ankiDispatcher = ankiDispatcher, myWhooshDispatcher = myWhooshDispatcher)
-        router.routeGesture(ButtonGestureEvent(ClickButton.Z, PressType.SINGLE_CLICK))
-        assertEquals(MappedTargetAction.MW_SHIFT_DOWN.label, router.lastRoutedActionLabel.value)
     }
 }

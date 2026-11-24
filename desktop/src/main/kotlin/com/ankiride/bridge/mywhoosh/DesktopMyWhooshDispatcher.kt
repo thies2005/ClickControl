@@ -11,29 +11,20 @@ class DesktopMyWhooshDispatcher(
 ) : MyWhooshActionDispatcher {
 
     override suspend fun dispatch(action: MyWhooshAction, config: AppConfiguration): Boolean {
-        // 1. If OpenBikeControl has connected clients (local or over LAN), dispatch via TCP protocol
         if (openBikeClient.hasConnectedClients()) {
             val delivered = openBikeClient.sendAction("127.0.0.1", config.openBikeServerPort, action)
-            if (delivered) {
-                return true
-            }
+            if (delivered) return true
         }
 
-        // 2. Otherwise if fallback is enabled when no client is connected, try keyboard shortcut first, then screen click
-        if (config.useMyShiftTouchFallbackWhenNoClient) {
-            val keyboardOk = DesktopMyWhooshRobot.performKeyboardShiftOrAction(action)
-            if (keyboardOk) {
-                return true
-            }
-
-            val clickOk = DesktopMyWhooshRobot.performScreenClickFallback(action, config)
-            if (clickOk) {
-                return true
-            }
-
-            DiagnosticLogger.warn(LogCategory.MYWHOOSH, "Desktop Robot fallback failed for $action")
+        val err = openBikeClient.lastServerErrorFlow.value
+        if (err != null) {
+            DiagnosticLogger.error(LogCategory.MYWHOOSH, "Shift blocked ($action): $err")
+        } else {
+            DiagnosticLogger.warn(
+                LogCategory.MYWHOOSH,
+                "Shift ignored ($action): MyWhoosh is not connected yet. In MyWhoosh → Devices → Controllers, select '${openBikeClient.serviceName}' (${openBikeClient.lanEndpointSummary(config.openBikeServerPort)})."
+            )
         }
-
         return false
     }
 }

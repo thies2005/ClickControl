@@ -16,34 +16,48 @@ spec = importlib.util.spec_from_file_location('worker', path)
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
+
 class SideTest(unittest.TestCase):
     def test_identification_and_pins(self):
         adv = lambda n: types.SimpleNamespace(manufacturer_data={worker.ZWIFT_MANUFACTURER_ID: bytes([n])})
-        w = worker.ZwiftBleWorker()
+        w = worker.ZwiftBleWorker(pod_mode='right_only')
         self.assertEqual('RIGHT', w.side_for('AA', adv(7)))
-        self.assertEqual('LEFT', w.side_for('AA', adv(8)))
+        self.assertIsNone(w.side_for('AA', adv(8)))
         self.assertIsNone(w.side_for('AA', adv(9)))
         self.assertIsNone(w.side_for('AA', adv(42)))
-        legacy = worker.ZwiftBleWorker(legacy_shared=True)
-        self.assertEqual('RIGHT', legacy.side_for('AA', adv(9)))
-        self.assertEqual('RIGHT', legacy.side_for('AA', adv(42)))
-        self.assertIsNone(worker.ZwiftBleWorker(pinned_right='BB', legacy_shared=True).side_for('AA', adv(9)))
-        self.assertEqual('RIGHT', worker.ZwiftBleWorker(pinned_right='AA').side_for('AA', adv(9)))
-        self.assertIsNone(worker.ZwiftBleWorker(pinned_right='AA', pinned_left='AA').side_for('AA', adv(7)))
+
+        single = worker.ZwiftBleWorker(pod_mode='single')
+        self.assertEqual('RIGHT', single.side_for('AA', adv(9)))
+        self.assertEqual('RIGHT', single.side_for('AA', adv(42)))
+        self.assertIsNone(worker.ZwiftBleWorker(pod_mode='single', pinned_right='BB').side_for('AA', adv(9)))
+        self.assertEqual('RIGHT', worker.ZwiftBleWorker(pod_mode='right_only', pinned_right='AA').side_for('AA', adv(9)))
+        self.assertIsNone(worker.ZwiftBleWorker(pod_mode='both', pinned_right='AA', pinned_left='AA').side_for('AA', adv(7)))
+
+    def test_four_arrow_ride_controller_0x0b_and_single_isolation(self):
+        adv = lambda n: types.SimpleNamespace(manufacturer_data={worker.ZWIFT_MANUFACTURER_ID: bytes([n])})
+        both = worker.ZwiftBleWorker(pod_mode='both')
+        self.assertEqual('LEFT', both.side_for('02:00:00:00:00:01', adv(0x0B)))
+        self.assertTrue(worker.is_left_pod(adv(0x0B)))
+
+        single_pinned = worker.ZwiftBleWorker(pod_mode='single', pinned_left='02:00:00:00:00:01')
+        self.assertEqual('LEFT', single_pinned.side_for('02:00:00:00:00:01', adv(0x0B)))
+        self.assertIsNone(single_pinned.side_for('11:22:33:44:55:66', adv(7)))
 
     def test_play_controllers(self):
         adv = lambda n: types.SimpleNamespace(manufacturer_data={worker.ZWIFT_MANUFACTURER_ID: bytes([n])})
-        w = worker.ZwiftBleWorker()
+        w = worker.ZwiftBleWorker(pod_mode='both')
         self.assertEqual('RIGHT', w.side_for('AA', adv(worker.DEVICE_ID_PLAY_RIGHT)))
         self.assertEqual('LEFT', w.side_for('AA', adv(worker.DEVICE_ID_PLAY_LEFT)))
         self.assertTrue(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_LEFT)))
         self.assertFalse(worker.is_left_pod(adv(worker.DEVICE_ID_PLAY_RIGHT)))
 
-    def test_left_reconnect_window_configuration(self):
-        w = worker.ZwiftBleWorker(left_reconnect_sec=12)
+    def test_left_reconnect_window_and_error_formatting(self):
+        w = worker.ZwiftBleWorker(pod_mode='both', left_reconnect_sec=12)
         self.assertEqual(12, w.left_reconnect_sec)
         self.assertTrue(w.running)
         self.assertEqual(0, worker.ZwiftBleWorker(left_reconnect_sec=-5).left_reconnect_sec)
+        self.assertIn('turned off', worker.format_bleak_error(Exception('org.bluez.Error.NotReady: Resource Not Ready')))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.BindException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -19,20 +20,22 @@ class OpenBikeControlClient(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
     companion object {
-        const val DEFAULT_PORT = 21587
-        const val MAX_CONNECTED_CLIENTS = 4
-        const val CLIENT_SO_TIMEOUT_MS = 60_000
-        const val SERVICE_TYPE = "_openbikecontrol._tcp."
-        const val SERVICE_NAME = "ClickControl"
-        const val OPENBIKE_BLE_SERVICE_UUID = "d273f680-d548-419d-b9d1-fa0472345229"
-        const val MSG_BUTTON_STATE: Byte = 0x01
-        const val MSG_DEVICE_STATUS: Byte = 0x02
-        const val MSG_HAPTIC_FEEDBACK: Byte = 0x03
-        const val MSG_APP_INFO: Byte = 0x04
-        const val STATE_PRESSED: Byte = 0x01
-        const val STATE_RELEASED: Byte = 0x00
-        const val PRESS_HOLD_MS = 90L
+        const val DEFAULT_PORT = OpenBikeProtocol.DEFAULT_PORT
+        const val MAX_CONNECTED_CLIENTS = OpenBikeProtocol.MAX_CONNECTED_CLIENTS
+        const val CLIENT_SO_TIMEOUT_MS = OpenBikeProtocol.CLIENT_SO_TIMEOUT_MS
+        const val SERVICE_TYPE = OpenBikeProtocol.SERVICE_TYPE
+        val SERVICE_NAME: String get() = OpenBikeProtocol.desktopServiceName()
+        const val OPENBIKE_BLE_SERVICE_UUID = OpenBikeProtocol.OPENBIKE_BLE_SERVICE_UUID
+        const val MSG_BUTTON_STATE = OpenBikeProtocol.MSG_BUTTON_STATE
+        const val MSG_DEVICE_STATUS = OpenBikeProtocol.MSG_DEVICE_STATUS
+        const val MSG_HAPTIC_FEEDBACK = OpenBikeProtocol.MSG_HAPTIC_FEEDBACK
+        const val MSG_APP_INFO = OpenBikeProtocol.MSG_APP_INFO
+        const val STATE_PRESSED = OpenBikeProtocol.STATE_PRESSED
+        const val STATE_RELEASED = OpenBikeProtocol.STATE_RELEASED
+        const val PRESS_HOLD_MS = OpenBikeProtocol.PRESS_HOLD_MS
     }
+
+    val serviceName: String = OpenBikeProtocol.desktopServiceName()
 
     private val lifecycleLock = Any()
     private var serverGeneration = 0L
@@ -46,14 +49,32 @@ class OpenBikeControlClient(
     private val _connectedAppInfo = MutableStateFlow<String?>(null)
     val connectedAppInfo: StateFlow<String?> = _connectedAppInfo.asStateFlow()
 
+    private val _isServerRunningFlow = MutableStateFlow(false)
+    val isServerRunningFlow: StateFlow<Boolean> = _isServerRunningFlow.asStateFlow()
+
+    private val _boundPortFlow = MutableStateFlow<Int?>(null)
+    val boundPortFlow: StateFlow<Int?> = _boundPortFlow.asStateFlow()
+
+    private val _lastServerErrorFlow = MutableStateFlow<String?>(null)
+    val lastServerErrorFlow: StateFlow<String?> = _lastServerErrorFlow.asStateFlow()
+
     fun connectedClientCount(): Int = connectedClients.count { !it.isClosed && it.isConnected }
 
     fun hasConnectedClients(): Boolean = connectedClientCount() > 0
+
+    fun boundPort(): Int? = _boundPortFlow.value
+
+    fun lanEndpointSummary(configuredPort: Int): String {
+        val host = OpenBikeProtocol.findPrimaryLanIpv4Address() ?: "this computer's Wi-Fi IP"
+        val port = _boundPortFlow.value ?: configuredPort
+        return "$host:$port"
+    }
 
     fun startServer(port: Int = DEFAULT_PORT, bindLocalhostOnly: Boolean = false) {
         synchronized(lifecycleLock) {
             if (acceptJob?.isActive == true || serverSocket != null) return
             val generation = ++serverGeneration
+            _lastServerErrorFlow.value = null
             acceptJob = scope.launch {
                 var ownedSocket: ServerSocket? = null
                 try {
@@ -67,9 +88,12 @@ class OpenBikeControlClient(
                     synchronized(lifecycleLock) {
                         if (generation != serverGeneration || !isActive) return@launch
                         serverSocket = srv
+                        _isServerRunningFlow.value = true
+                        _boundPortFlow.value = srv.localPort
+                        _lastServerErrorFlow.value = null
                         DiagnosticLogger.info(
                             LogCategory.MYWHOOSH,
-                            "OpenBikeControl TCP Server listening on port ${srv.localPort}"
+                            "OpenBikeControl TCP Server '$serviceName' listening on ${lanEndpointSummary(srv.localPort)}"
                         )
                         mdnsAdvertiser.registerOpenBikeService(srv.localPort)
                     }
@@ -88,19 +112,15 @@ class OpenBikeControlClient(
                                 connectedClients.removeIf { it.isClosed || !it.isConnected }
                                 while (connectedClients.size >= MAX_CONNECTED_CLIENTS) {
                                     val oldest = if (connectedClients.isNotEmpty()) connectedClients.removeAt(0) else break
-                                    try {
-                                        oldest.close()
-                                    } catch (_: Exception) {
-                                    }
+                                    runCatching { oldest.close() }
                                 }
                                 connectedClients.add(client)
                                 _connectedClientCountFlow.value = connectedClients.size
                                 DiagnosticLogger.info(
                                     LogCategory.MYWHOOSH,
-                                    "MyWhoosh connected from $rawHost (tcpNoDelay=true, clients=${connectedClients.size})"
+                                    "MyWhoosh connected from $rawHost (clients=${connectedClients.size})"
                                 )
-                                // Send initial OpenBikeControl 0x02 Device Status (100% battery, connected = 1)
-                                sendRawBytes(client, byteArrayOf(MSG_DEVICE_STATUS, 0x64, 0x01))
+                                sendRawBytes(client, OpenBikeProtocol.deviceStatusPacket())
                                 listenToClientMessages(client, rawHost)
                             } else {
                                 DiagnosticLogger.warn(LogCategory.MYWHOOSH, "Rejected non-LAN socket from $rawHost")
@@ -108,15 +128,23 @@ class OpenBikeControlClient(
                             }
                         }
                     }
+                } catch (_: BindException) {
+                    val msg = "OpenBikeControl port $port is already in use by another app. Stop the other app or change the port in Settings."
+                    _lastServerErrorFlow.value = msg
+                    DiagnosticLogger.error(LogCategory.MYWHOOSH, msg)
                 } catch (e: Exception) {
-                    if (isActive) {
-                        DiagnosticLogger.error(LogCategory.MYWHOOSH, "OpenBikeControl server error: ${e.message}")
+                    if (isActive && generation == serverGeneration) {
+                        val msg = "OpenBikeControl server error: ${e.message}"
+                        _lastServerErrorFlow.value = msg
+                        DiagnosticLogger.error(LogCategory.MYWHOOSH, msg)
                     }
                 } finally {
                     runCatching { ownedSocket?.close() }
                     synchronized(lifecycleLock) {
                         if (generation == serverGeneration) {
                             serverSocket = null
+                            _isServerRunningFlow.value = false
+                            _boundPortFlow.value = null
                             mdnsAdvertiser.unregister()
                         }
                     }
@@ -171,35 +199,15 @@ class OpenBikeControlClient(
         if (data.isEmpty()) return
         when (data[0]) {
             MSG_APP_INFO -> {
-                try {
-                    if (data.size >= 5) {
-                        val ver = data[1].toInt() and 0xFF
-                        val idLen = data[2].toInt() and 0xFF
-                        val appId = if (3 + idLen <= data.size) String(data, 3, idLen, Charsets.UTF_8) else "?"
-                        val verIdx = 3 + idLen
-                        val verLen = if (verIdx < data.size) data[verIdx].toInt() and 0xFF else 0
-                        val appVer = if (verIdx + 1 + verLen <= data.size) String(data, verIdx + 1, verLen, Charsets.UTF_8) else "?"
-                        val btnCountIdx = verIdx + 1 + verLen
-                        val btnCount = if (btnCountIdx < data.size) data[btnCountIdx].toInt() and 0xFF else 0
-                        val btnsHex = if (btnCountIdx + 1 < data.size) {
-                            data.copyOfRange(btnCountIdx + 1, data.size).joinToString(" ") { "0x%02X".format(it) }
-                        } else "ALL"
-
-                        val parsedInfo = "$appId v$appVer"
-                        _connectedAppInfo.value = parsedInfo
-
-                        if (canLog) {
-                            DiagnosticLogger.info(
-                                LogCategory.MYWHOOSH,
-                                "Received 0x04 AppInfo from $host: app='$appId' v$appVer (proto=$ver, supportedButtons($btnCount)=[$btnsHex])"
-                            )
-                        }
-                    }
-                } catch (_: Exception) {
+                val parsedInfo = OpenBikeProtocol.parseAppInfo(data)
+                if (parsedInfo != null) {
+                    _connectedAppInfo.value = parsedInfo
                     if (canLog) {
-                        val hex = data.joinToString(" ") { "%02X".format(it) }
-                        DiagnosticLogger.info(LogCategory.MYWHOOSH, "Received 0x04 AppInfo from $host: [$hex]")
+                        DiagnosticLogger.info(LogCategory.MYWHOOSH, "Received 0x04 AppInfo from $host: $parsedInfo")
                     }
+                } else if (canLog) {
+                    val hex = data.joinToString(" ") { "%02X".format(it) }
+                    DiagnosticLogger.info(LogCategory.MYWHOOSH, "Received 0x04 AppInfo from $host: [$hex]")
                 }
             }
             MSG_HAPTIC_FEEDBACK -> {
@@ -217,15 +225,14 @@ class OpenBikeControlClient(
         }
     }
 
-    suspend fun sendAction(action: MyWhooshAction): Boolean {
-        return sendAction("127.0.0.1", 21587, action)
-    }
+    suspend fun sendAction(action: MyWhooshAction): Boolean =
+        sendAction("127.0.0.1", DEFAULT_PORT, action)
 
     suspend fun sendAction(ip: String, port: Int, action: MyWhooshAction): Boolean = withContext(Dispatchers.IO) {
         if (!LanAddressValidator.isLocalOrLanAddress(ip)) return@withContext false
 
-        val pressPacket = byteArrayOf(MSG_BUTTON_STATE, action.openBikeOpcode, STATE_PRESSED)
-        val releasePacket = byteArrayOf(MSG_BUTTON_STATE, action.openBikeOpcode, STATE_RELEASED)
+        val pressPacket = OpenBikeProtocol.buttonPacket(action, pressed = true)
+        val releasePacket = OpenBikeProtocol.buttonPacket(action, pressed = false)
 
         var delivered = false
         for (client in connectedClients) {
@@ -275,20 +282,15 @@ class OpenBikeControlClient(
 
             mdnsAdvertiser.unregister()
 
-            connectedClients.forEach {
-                try {
-                    it.close()
-                } catch (_: Exception) {
-                }
-            }
+            connectedClients.forEach { runCatching { it.close() } }
             connectedClients.clear()
             _connectedClientCountFlow.value = 0
             _connectedAppInfo.value = null
+            _isServerRunningFlow.value = false
+            _boundPortFlow.value = null
+            _lastServerErrorFlow.value = null
 
-            try {
-                serverSocket?.close()
-            } catch (_: Exception) {
-            }
+            runCatching { serverSocket?.close() }
             serverSocket = null
         }
     }

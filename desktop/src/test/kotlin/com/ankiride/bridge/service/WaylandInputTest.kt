@@ -125,8 +125,12 @@ class WaylandInputTest {
         val backend = WaylandInputBackend(runner, mapOf("YDOTOOL_SOCKET" to "/external")) { false }
         performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.DOWN, scrollAmount = 3, clickAtPointer = true), Rectangle(1, 1))
         performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.UP, scrollAmount = 2, clickAtPointer = true), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.LEFT, scrollAmount = 3, clickAtPointer = true), Rectangle(1, 1))
+        performInput(backend, MappedTargetAction.SCREEN_SCROLL, InputConfig(scrollDirection = ScrollDirection.RIGHT, scrollAmount = 4, clickAtPointer = true), Rectangle(1, 1))
         assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "0", "3") })
         assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "0", "-2") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "3", "0") })
+        assertTrue(runner.calls.any { it == listOf("ydotool", "mousemove", "-w", "--", "-4", "0") })
         performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.PAGE_UP), Rectangle(1, 1))
         performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.PAGE_DOWN), Rectangle(1, 1))
         performInput(backend, MappedTargetAction.KEYBOARD_INPUT, InputConfig(key = PortableKey.HOME), Rectangle(1, 1))

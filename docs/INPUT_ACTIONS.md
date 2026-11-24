@@ -1,31 +1,38 @@
-# Screen clicks and keyboard input
+# Presentations, scrolling, taps, and keyboard shortcuts
 
-A named preset can map each controller button's **Press** and **Hold** to an Anki action, a bike action, a **Screen click**, a **Keyboard input**, or no action. Generic input works on the device running ClickControl; it is not forwarded to the configured AnkiConnect host.
+Presets map each physical button's **Single press** and **Hold** to Anki actions, MyWhoosh actions, or generic input actions supported on that platform. Generic input always runs locally on the device hosting ClickControl.
+
+## Platform capability differences
+
+| Action | Desktop | Android |
+|---|---|---|
+| **Scroll / Swipe (`SCREEN_SCROLL`)** | **Mouse wheel scroll** (Up, Down, Left, Right; `At current pointer` or fixed screen area; amount 1–20; optional **Repeat while held**) | **Touch swipe / scroll** (Next →, Prev ←, Scroll ↓, Scroll ↑ inside a screen area %; swipe distance 1–20; optional **Repeat while held**) |
+| **Click / Tap (`SCREEN_CLICK`)** | **Screen click** (`At current pointer` or center of a percentage rectangle) | **Screen tap** (center of a percentage rectangle; pointer mode is hidden) |
+| **Keyboard shortcut (`KEYBOARD_INPUT`)** | **Keyboard shortcut** (A–Z, 0–9, Space, Enter, Tab, Escape, Arrows, Page Up/Down, Home/End, Backspace, Delete, F1–F12 + Ctrl/Alt/Shift/Meta) | **Hidden / unsupported** (Android cannot dispatch arbitrary global keyboard shortcuts outside text editors; imported presets warn the user) |
 
 ## Configure an action
 
-1. Open **Presets** and select a preset or create a blank one.
-2. Select the right or left controller and the physical button.
-3. Open its Press or Hold action and choose Screen click or Keyboard input.
-4. Configure the area or key combination, then save the preset. Each binding has its own configuration. Every trigger sends a single click or key combination; there is no repeat mode.
-5. Start the bridge for controller input and put the target application in the foreground. The editor's delayed test lets you switch to the target before input is sent; cancel the countdown to stop the test.
+1. Open **Presets** and select an existing preset, start from a template (`Presentations`, `Document Scrolling`, etc.), or create a **Blank** preset.
+2. Select a controller button and pick an action for **Single press** or **Hold**.
+3. Configure the action parameters and save the preset:
+   - **Repeat while held (Single press only)**: Available on **Scroll / Swipe** and **Click / Tap** (and Desktop scroll/click actions). When enabled on Single press, holding the button repeats smoothly at one in-flight action at a time (without queuing a backlog after you let go), cancelling immediately on release. Long press on that same button pauses automatically whenever Single press has `Repeat while held` enabled.
+4. Start the bridge on **Control** and bring your presentation, PDF, or browser app to the front. In the preset editor you can use **Test in 3 seconds** to switch windows and verify a single action before saving.
 
-## Screen click
+## Screen click / Screen tap & Touch swipe areas
 
-On desktop you can choose a single click at the current pointer, without moving it. For a fixed target, define a rectangle using **Left**, **Top**, **Width**, and **Height**, as percentages of the screen. ClickControl clicks its centre. For example, Left 80%, Top 75%, Width 10%, Height 10% produces a click at 85% across and 80% down the screen.
+- Percentages (`Left`, `Top`, `Width`, `Height`) define a valid rectangle within 0–100% of the primary display (Desktop) or active full display (Android) with positive width and height.
+- **Screen click / Screen tap** targets the center of that rectangle.
+- **Touch swipe / scroll** (Android) swipes across the configured rectangle:
+  - **Next →** swipes right-to-left (advancing slides/pages); **Prev ←** swipes left-to-right.
+  - **Scroll ↓** swipes upward to scroll down through a document; **Scroll ↑** swipes downward to scroll up.
+- On **Desktop**, leaving **At current pointer** enabled for **Mouse wheel scroll** or **Screen click** acts wherever the mouse cursor currently rests — useful for scrolling documents or clicking without moving your cursor to fixed coordinates.
 
-The area must fit entirely on the screen and have positive width and height. Invalid or missing settings do not produce input. Use the current display orientation when measuring the area; rotation, window placement, keyboard visibility, scaling and application layout can move the target.
+## Keyboard shortcuts (Desktop only)
 
-Android uses its current full display and requires the ClickControl accessibility service. Desktop uses the primary display, including its configured origin. The click goes to whichever visible application occupies that location. It does not locate a control by label or follow a background window.
+Desktop dispatches keyboard shortcuts to the currently focused window via AWT Robot (X11/macOS/Windows) or `ydotool` (Ubuntu Wayland). Supported keys include letters, digits, navigation keys (`Page Up`, `Page Down`, `Home`, `End`, arrows), editing keys (`Space`, `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`), and function keys (`F1`–`F12`), plus `Ctrl`, `Alt`, `Shift`, and `Meta`.
 
-## Keyboard input
+On Android, `KEYBOARD_INPUT` is omitted from action pickers and rejected at runtime by `PlatformCapabilities`. Any preset imported from desktop containing `KEYBOARD_INPUT` shows a clear warning banner in Android **Presets** so you can replace those slots with **Touch swipe / scroll** or **Screen tap**.
 
-Choose a key, optionally with Ctrl, Alt, Shift or Meta. Supported keys include letters, digits, Space, Enter, Tab, Escape, arrows, Backspace, Delete and F1–F12. This sends a key combination, not a saved text string. Meta corresponds to the platform's Meta/Command/Super key where supported. Keyboard layout and the receiving application determine the result.
+## Saved presets and diagnostics
 
-Desktop sends input to the focused application through Java AWT Robot on X11/macOS/Windows, or through `ydotool` on Ubuntu Wayland. A graphical session and appropriate OS permissions are required. See [Wayland setup](WAYLAND.md) for prerequisites and fixed-area limitations. The app does not silently substitute bike controls for an unsupported input action.
-
-Android keyboard input requires **Android 13 or newer**, the accessibility service, and a focused text editor with an active input connection. It cannot promise system-wide shortcuts or control arbitrary game windows. Older Android versions still support accessibility screen clicks. These constraints follow Android's [accessibility input-method API](https://developer.android.com/reference/android/accessibilityservice/InputMethod).
-
-## Saved presets and feedback
-
-Existing presets remain readable. Generic parameters are stored with the exact physical button and press type; duplicating a preset retains them. Switching a binding back to a standard action does not turn it into a screen click or keystroke. Check the diagnostic log when the target app does not respond; input submission is not proof that an application handled the event.
+Presets store generic `InputConfig` payloads (`scrollDirection`, `scrollAmount`, `repeatWhileHeld`, `clickAtPointer`, screen area, and portable key/modifiers) per `(button, pressType)` using v3 serialization (while still reading v1 and v2 presets cleanly). Check **Settings -> Diagnostics** if a target app ignores injected events.

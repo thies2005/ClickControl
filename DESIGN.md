@@ -1,46 +1,45 @@
 # ClickControl design language
 
-ClickControl helps a rider see what is connected, choose a familiar controller setup, and review cards without thinking about network plumbing. Android is a touch application; Linux desktop is a keyboard-and-pointer application. They share language, colors, preset behavior and hierarchy, while adapting navigation and density to their platform.
+ClickControl adapts to the user's device instead of forcing one UI onto two fundamentally different operating systems. Desktop and Android share the `:core` domain model, preset engine, starter templates, and 3 controller connection modes, while presenting native platform chrome and isolating platform-only features via `PlatformCapabilities`.
 
-## Information architecture
+## Platform separation rules
 
-- **Control**: connection status, active preset, Anki destination, start/stop, and readable mappings. Show the selected physical pod and its ownership explicitly. Connectivity is a state, not a warning unless an action is needed.
-- **Presets**: a named library with create, duplicate, rename, save, reset and delete. Single press and hold are separate bindings. Unsaved edits must be visible; switching presets must not silently lose edits. Preserve at least one usable preset. The editor and actual button routing must share the same resolver.
-- **Settings**: Bluetooth ownership and pins, Anki connection, optional feedback, app startup and diagnostics. Advanced technical details stay here rather than on every control.
+- **Never expose unsupported capabilities**:
+  - Desktop never displays **AnkiDroid**, Android accessibility prompts, touch shift calibration, or "Android app / phone screen" copy. Linux autostart settings only appear on Linux.
+  - Android never displays **Keyboard shortcut**, current-pointer targeting, Wayland/ydotool settings, or desktop presentation key combos.
+  - Legacy 5-mode (`Anki + MyWhoosh` / `Split-Screen` / etc.) selectors are removed from the UI and HUD; every workflow is a named **Preset**. Old setups migrate into editable presets on upgrade.
 
-Old mixed mappings are imported as named editable presets. “Legacy” is an internal compatibility term and never a user-facing mode. Editing a mapping must not silently change controller ownership or Anki destination. Presets describe actions; connection settings describe which controllers ClickControl owns.
+## Visual systems
 
-## Semantic colors
+### Desktop (Ubuntu / GNOME Adwaita Dark + Yaru accent)
+
+Desktop (`desktop/`) uses GNOME/libadwaita-inspired layout primitives and Ubuntu Yaru accenting:
 
 | Role | Color | Use |
 | --- | --- | --- |
-| Background | #101B22 | Main app canvas |
-| Surface | #182A33 | Cards and navigation |
-| Elevated surface | #213943 | Editor controls and selected groups |
-| Primary | #70D8C8 | Main actions, selection and focus |
-| On primary | #062B28 | Text and icons on primary buttons |
-| Main text | #ECF5F4 | Titles, values and button labels |
-| Secondary text | #B5C9C8 | Supporting explanations |
-| Outline | #829B9A | Input and card boundaries |
+| Window canvas | `#1E1E1E` | Main Adwaita dark content background |
+| Sidebar surface | `#2B2B2B` | Persistent navigation rail and compact header |
+| Preference card (`AdwPreferencesGroup`) | `#303030` | Grouped settings, connection cards, and preset groups |
+| Elevated control | `#383838` | Inputs, interactive rows, and floating HUD surface |
+| Primary accent | `#E95420` | Ubuntu Yaru orange for primary actions and active states |
 
-Map these roles explicitly through Material 3, including button foregrounds, text fields, menus, tabs, selected states and floating HUDs. Hardware button colors can help recognition, but a label must always identify the button. Never depend only on color to communicate an action or connection state.
+- Structure: split sidebar + scrollable `AdwPreferencesGroup` / `AdwActionRow` cards on wide windows, adapting smoothly to compact windows.
+- Floating HUD window: compact pill showing BLE connection status and active preset name.
+
+### Android (Material 3 System UI)
+
+Android (`app/`) follows Material 3 system guidelines with a clean preference-group hierarchy:
+
+- Components: `AndroidSystemSection` cards, bottom navigation (**Control**, **Presets**, **Settings**), 48 dp minimum touch targets, system bar insets, and an optional compact floating HUD pill (`FloatingHudPill`, off by default).
+- Preset controls: swipe directions are arranged in a balanced 2×2 grid (`Next →` / `Prev ←`, `Scroll ↓` / `Scroll ↑`) with single-line labels so nothing wraps awkwardly at phone widths, and screen percentages format cleanly as rounded integers/tenths.
+
+## Information architecture
+
+- **Control**: BLE connection state, active preset name, platform-valid Anki destination, Connect/Disconnect primary action, and a clean list of physical controller bindings (`Single press` + `Hold`). Connectivity is shown as a calm status badge rather than an alarm unless user action is needed.
+- **Presets**: named library with **New from template** (`Presentations` / `Presentations (Swipe)`, `Document Scrolling`, `Anki Desktop` or `AnkiDroid`, `AnkiWeb (Browser)`, `Ride + Anki`, `Blank`), Rename, Duplicate, Delete (always retaining at least one preset), explicit Save/Reset, and unsaved-change protection.
+  - Press and Hold are edited independently per button. When Single Press enables **Repeat while held**, Hold displays a clear note that Long Press pauses while Single Press repeats on hold.
+- **Settings**: 3 controller connection modes (**Right controller only**, **Both controllers**, **Any single controller (auto-connect)**), optional hardware address pinning, Anki connection parameters, Android MyWhoosh location (**On this Android device** vs. **On another device**), feedback toggles, and diagnostics.
 
 ## Design goals and verification status
 
-The palette above is implemented in both platform themes. The following typography, spacing, adaptive layout and accessibility statements are design goals; they are not a claim that every screen or accessibility path has been verified. See [AUDIT.md](AUDIT.md) for observed coverage.
-
-## Type and spacing
-
-Use the platform sans-serif family with a consistent hierarchy: a modest app title, clear section headings, readable body text, and secondary supporting text. Do not put an action sentence inside a small hardware circle. Use the physical label (Y, Z, A, B, +) as a badge next to the full action label. Keep technical addresses and diagnostics secondary.
-
-Use an 8 dp spacing rhythm with 16–24 dp section padding. Use 12–16 dp card corners and restrained outlines. Avoid heavily nested cards and arbitrary accent colors. Buttons need enough horizontal space for a whole label: prefer “Connect”, “Save preset”, “Duplicate”, and “Test Anki”. Let supporting descriptions wrap naturally. Never shrink text to make a layout fit.
-
-## Platform behavior
-
-Android uses bottom navigation, one primary column, scrollable content and touch targets of at least 48 dp. Respect system bars and keyboard insets. Put lengthy explanations below controls, not inside buttons. At larger text sizes, stack actions rather than squeezing labels into vertical letter columns.
-
-Desktop uses persistent navigation and a split layout where space permits; the same content becomes a single scrollable column in compact windows. All actions need visible text, keyboard focus and predictable order. Preserve useful window size; no essential tab or action may fall outside a clipped horizontal strip.
-
-## Verification
-
-Inspect actual screenshots at phone width, desktop wide and desktop compact. Exercise preset creation, edits, save, switching, rename, duplicate, delete and restart persistence. Confirm a custom mapping routes the selected physical button to the shown action. Check text on every filled/outlined button and selected menu item. Screenshots establish visible layout, not full accessibility compliance or real BLE behavior.
+Screenshots on Android emulator and live Wayland desktop behavior establish layout clarity and input delivery for covered scenarios; see [AUDIT.md](AUDIT.md) for exact observed coverage, unit-test counts, and hardware scenarios that still require physical validation.

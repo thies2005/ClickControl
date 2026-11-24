@@ -5,7 +5,7 @@ import com.ankiride.bridge.core.DiagnosticLogger
 import com.ankiride.bridge.core.LogCategory
 import com.ankiride.bridge.core.MyWhooshAction
 import com.ankiride.bridge.core.MyWhooshActionDispatcher
-import com.ankiride.bridge.core.OperatingMode
+import com.ankiride.bridge.core.MyWhooshLocation
 import com.ankiride.bridge.service.BridgeAccessibilityService
 
 class MyWhooshNetworkDispatcherImpl(
@@ -14,28 +14,34 @@ class MyWhooshNetworkDispatcherImpl(
 ) : MyWhooshActionDispatcher {
 
     override suspend fun dispatch(action: MyWhooshAction, config: AppConfiguration): Boolean {
-        val isTabletMyWhoosh = config.mode == OperatingMode.MODE_1_TABLET_SPLIT_SCREEN ||
-            config.mode == OperatingMode.MODE_4_MYWHOOSH_ONLY
+        // 1. Official native OpenBikeControl TCP channel is primary (low latency, zero permissions needed).
+        if (client.hasConnectedClients()) {
+            val deliveredNetwork = client.sendAction("127.0.0.1", config.openBikeServerPort, action)
+            if (deliveredNetwork) return true
+        }
 
-        // 1. Fire immediate 0ms-latency on-screen MyShift touch tap first in Tablet Modes
-        var deliveredTouch = false
-        if (isTabletMyWhoosh && config.useMyShiftTouchFallbackWhenNoClient &&
+        // 2. Optional calibrated screen-tap fallback only when explicitly enabled for MyWhoosh on this device.
+        val isLocalMyWhoosh = config.myWhooshLocation == MyWhooshLocation.ON_THIS_DEVICE
+        if (isLocalMyWhoosh && config.useMyShiftTouchFallbackWhenNoClient &&
             (action == MyWhooshAction.SHIFT_UP || action == MyWhooshAction.SHIFT_DOWN)
         ) {
             val service = accessibilityServiceSupplier()
             if (service != null) {
-                deliveredTouch = MyShiftGestureFallback.performTouchAction(service, action, config)
+                return MyShiftGestureFallback.performTouchAction(service, action, config)
             } else {
-                DiagnosticLogger.warn(LogCategory.MYWHOOSH, "AccessibilityService not active for MyShift touch tap")
+                DiagnosticLogger.warn(LogCategory.MYWHOOSH, "Touch shift fallback enabled, but Accessibility Service is off")
             }
         }
 
-        // 2. Also send official binary OpenBikeControl packet (0x01) if a client is connected
-        var deliveredNetwork = false
-        if (client.hasConnectedClients()) {
-            deliveredNetwork = client.sendAction("127.0.0.1", config.openBikeServerPort, action)
+        val err = client.lastServerErrorFlow.value
+        if (err != null) {
+            DiagnosticLogger.error(LogCategory.MYWHOOSH, "Shift blocked ($action): $err")
+        } else {
+            DiagnosticLogger.warn(
+                LogCategory.MYWHOOSH,
+                "Shift ignored ($action): MyWhoosh is not connected yet. Open MyWhoosh → Devices → Controllers and select '${OpenBikeProtocol.SERVICE_NAME_ANDROID}' (port ${config.openBikeServerPort})."
+            )
         }
-
-        return deliveredTouch || deliveredNetwork
+        return false
     }
 }

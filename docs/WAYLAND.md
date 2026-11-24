@@ -1,46 +1,41 @@
 # Ubuntu Wayland input
 
-ClickControl uses a Linux `ydotool` backend on Wayland instead of Java AWT Robot. Each controller action sends one key combination or one click. There is no repeating-click mode.
+On Wayland sessions (`XDG_SESSION_TYPE=wayland`), Desktop ClickControl uses a `ydotool` / `ydotoold` backend instead of Java AWT Robot for keyboard shortcuts, screen clicks, and mouse wheel scrolling. Single-press actions can trigger once or use opt-in **Repeat while held** (coalesced one-in-flight queue, cancelled immediately on button release).
 
 ## Requirements
 
-Ubuntu/GNOME needs `ydotool` and `ydotoold` available on PATH, and the user must already have write access to `/dev/uinput`, or access to an existing daemon socket. Check with:
+Ubuntu/GNOME needs `ydotool` and `ydotoold` on `PATH` plus write access to `/dev/uinput` (or an existing `YDOTOOL_SOCKET`):
 
 ```bash
 command -v ydotool ydotoold
 test -w /dev/uinput && echo 'Input access available'
 ```
 
-The app never runs sudo, changes device permissions, or changes mouse settings. If access is missing, have the system administrator configure it. When no socket is explicitly configured, ClickControl can start a private daemon using a 0700 runtime directory and a 0600 socket, then stop that owned daemon on application exit. An existing daemon supplied with `YDOTOOL_SOCKET` is reused and is not terminated by ClickControl. An invalid explicitly configured socket produces an error instead of silently changing backends.
+ClickControl never runs `sudo`, changes device permissions, or alters mouse settings. If `YDOTOOL_SOCKET` is unset, ClickControl launches a private `ydotoold` instance inside a `0700` runtime directory with a `0600` socket and terminates it on exit. An existing configured `YDOTOOL_SOCKET` is reused and left running.
 
-For fixed screen areas on GNOME, also install Python's GTK4 introspection support. On Ubuntu the relevant packages are:
+For **fixed screen-area clicks or fixed-area scrolls** on GNOME Wayland, Python GTK4 introspection is also used to query logical monitor geometry:
 
 ```bash
 sudo apt install ydotool python3-gi gir1.2-gtk-4.0
 ```
 
-## Single clicks
+## Scrolling, pointer clicks, and keyboard shortcuts
 
-In a preset, choose **Screen click** for a button's Press or Hold. Desktop supports clicking at the current pointer without moving it, or clicking the centre of a configured screen area. Put the target application in front before using the controller.
+- **Keyboard shortcuts & AnkiWeb desktop keys**: Use `ydotool key` with explicit Linux evdev keycodes and do not require GNOME `flat` mouse acceleration or single-monitor geometry.
+- **Mouse wheel scroll (`At current pointer`)**: Uses `ydotool mousemove -w -- <dx> <dy>` at your current pointer location and does not require a `flat` mouse acceleration profile. Because `ydotool mousemove -w` negates horizontal relative wheel axes (`+X` scrolls left, `-X` scrolls right) while `+Y` scrolls down and `-Y` scrolls up, `WaylandInputBackend` negates `horizontal` so **Right** scrolls right and **Left** scrolls left consistently across Robot and Wayland backends.
+- **Fixed-area clicks / fixed-area scrolls**: Move the pointer using native GDK Wayland logical display bounds and GNOME's mouse speed setting. These require a single-monitor GNOME session with `org.gnome.desktop.peripherals.mouse accel-profile` set to `'flat'`. Unsupported layouts or non-flat profiles report a clear error instead of guessing coordinates.
 
-Fixed-area Wayland clicks currently support a single GNOME monitor with a flat mouse acceleration profile. ClickControl reads native Wayland logical geometry and compensates for GNOME's mouse-speed setting. It does not use XWayland's AWT dimensions, which can differ under fractional scaling. Unknown desktop gain, unsupported layouts, or unavailable prerequisites are reported instead of using an unverified coordinate transform.
+Use **Test in 3 seconds** in the Preset editor to focus a target window and test a single input before saving.
 
-Keyboard input and current-pointer clicks do not need a fixed-area coordinate transform. Delivery still depends on the focused application and system input permissions. Other compositors and display layouts need separate validation.
+## Integration tests
 
-Use the editor's **Test in 3 seconds** control to switch to a test window before input is sent. It sends a single action and can be cancelled during the countdown. Stop bridge cancels pending controller input; an event already delivered to the OS cannot be recalled.
-
-## Integration test
-
-The packaged executable has an explicit live-input test hook for manual verification. These commands send real input after a three-second delay, so focus a disposable target window first:
+The packaged desktop binary provides `--live-input-test` (waits 3 seconds so you can focus a test window):
 
 ```bash
 ClickControl --live-input-test key A
 ClickControl --live-input-test click 0.15 0.15 0.1 0.1
 ClickControl --live-input-test pointer
+ClickControl --live-input-test scroll down 3
 ```
 
-The click rectangle uses fractions, so the example clicks at 20% across and 20% down. `--self-test` remains the non-interactive smoke test. Live input verification is separate from unit tests.
-
-## Verified local result
-
-Native GTK4 testing on Ubuntu GNOME Wayland passed for keyboard A, two fixed-area clicks and a current-pointer click. The app-started private daemon was tested, and fixed targets were within 0.4 logical pixels at the existing fractional display scale and mouse speed. See [the recorded result](test-results/wayland-native.json) and [verification status](../AUDIT.md). Each trigger produces one click; no repeating mode is present.
+`--self-test` remains the headless smoke test for parser, gesture engine, routing, presets, and local server startup. See [AUDIT.md](../AUDIT.md) and [recorded native click result](test-results/wayland-native.json) for observed GNOME Wayland measurements.

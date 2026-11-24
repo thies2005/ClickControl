@@ -6,55 +6,50 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.ankiride.bridge.anki.AnkiConnectClient
 import com.ankiride.bridge.anki.DesktopAnkiDispatcher
 import com.ankiride.bridge.ble.DesktopZwiftBleController
+import com.ankiride.bridge.ble.PodSelectionPolicy
 import com.ankiride.bridge.ble.ZwiftGestureEngine
 import com.ankiride.bridge.ble.ZwiftPacketParser
 import com.ankiride.bridge.core.*
 import com.ankiride.bridge.mywhoosh.DesktopMyWhooshDispatcher
 import com.ankiride.bridge.mywhoosh.OpenBikeControlClient
+import com.ankiride.bridge.mywhoosh.OpenBikeProtocol
 import com.ankiride.bridge.service.DesktopActionRouter
+import com.ankiride.bridge.service.DesktopGenericInputDispatcher
 import com.ankiride.bridge.ui.DesktopAppUi
+import com.ankiride.bridge.ui.DesktopTrayController
 import com.ankiride.bridge.ui.FloatingHudDesktopWindow
+import com.ankiride.bridge.ui.TraySnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.awt.Color
-import java.awt.Font
-import java.awt.RenderingHints
-import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import java.io.File
+import java.io.IOException
 import kotlin.system.exitProcess
 
-/**
- * Creates a standalone in-memory programmatic tray icon painter.
- * Avoids crashing on missing external image resources.
- */
-fun createTrayPainter(): androidx.compose.ui.graphics.painter.Painter {
-    val size = 32
-    val img = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
-    val g = img.createGraphics()
-    try {
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        g.color = Color(0x38, 0xBD, 0xF8) // Sky Blue
-        g.fillRoundRect(2, 2, size - 4, size - 4, 8, 8)
-        g.color = Color(0x0F, 0x17, 0x2A) // Dark Slate
-        g.font = Font("SansSerif", Font.BOLD, 19)
-        g.drawString("A", 9, 23)
-    } finally {
-        g.dispose()
+private fun createWindowIconPainter(): BitmapPainter {
+    val stream = DesktopTrayController::class.java.getResourceAsStream("/icons/clickcontrol.png")
+    if (stream != null) {
+        stream.use { input ->
+            ImageIO.read(input)?.let { img -> return BitmapPainter(img.toComposeImageBitmap()) }
+        }
     }
-    return BitmapPainter(img.toComposeImageBitmap())
+    return BitmapPainter(
+        DesktopTrayController.renderCrispTrayImage(
+            128,
+            TraySnapshot(running = true, bleState = BleConnectionState.DISCONNECTED, activePresetId = "", hudEnabled = false, presets = emptyList())
+        ).toComposeImageBitmap()
+    )
 }
 
 /**
@@ -114,21 +109,36 @@ fun runHeadlessSelfTest() {
     }
     println("✓ ZwiftGestureEngine verification passed")
 
-    // 3. Verify ButtonMappingStore
-    val resolvedZ = ButtonMappingStore.resolveAction(
-        OperatingMode.MODE_1_TABLET_SPLIT_SCREEN,
-        ClickButton.Z,
-        PressType.SINGLE_CLICK,
-        emptyMap()
-    )
-    check(resolvedZ == MappedTargetAction.MW_SHIFT_UP) {
-        "ButtonMappingStore default Z failed: expected MW_SHIFT_UP, got $resolvedZ"
-    }
-
+    // 3. Verify PresetStore, PodSelectionPolicy & ButtonMappingStore
     val tempFile = File.createTempFile("ankiride_selftest_", ".properties")
     tempFile.deleteOnExit()
+    val testPreset = PresetStore.createFromTemplate(PresetTemplate.ANKI_LOCAL, PlatformCapabilities.desktop())
+    val resolvedZ = PresetStore.resolve(
+        AppConfiguration(presets = listOf(testPreset), activePresetId = testPreset.id),
+        ClickButton.Z,
+        PressType.SINGLE_CLICK
+    )
+    check(resolvedZ == MappedTargetAction.ANKI_FLIP_OR_HARD) {
+        "PresetStore Z binding failed: expected ANKI_FLIP_OR_HARD, got $resolvedZ"
+    }
+
+    val singlePinCfg = AppConfiguration(
+        podAssignment = PodAssignment.SINGLE_CONTROLLER,
+        pinnedLeftPodMac = "02:00:00:00:00:01"
+    )
+    check(PodSelectionPolicy.sideFor("02:00:00:00:00:01", 0x0B, singlePinCfg) == PodSelectionPolicy.Side.LEFT) {
+        "PodSelectionPolicy failed pinned 0x0B left controller"
+    }
+    check(PodSelectionPolicy.sideFor("11:22:33:44:55:66", 0x07, singlePinCfg) == null) {
+        "PodSelectionPolicy failed to isolate second controller when pinned"
+    }
+
     val testConfig = AppConfiguration(
-        mode = OperatingMode.MODE_5_UBUNTU_ANKICONNECT,
+        presets = listOf(testPreset),
+        activePresetId = testPreset.id,
+        defaultPresetId = testPreset.id,
+        podAssignment = PodAssignment.SINGLE_CONTROLLER,
+        startMinimizedToTray = true,
         ubuntuAnkiConnectHost = "127.0.0.1",
         ubuntuAnkiConnectPort = 8765,
         floatingHudPillEnabled = true
@@ -136,14 +146,16 @@ fun runHeadlessSelfTest() {
     ButtonMappingStore.saveConfiguration(testConfig, tempFile)
     val loadedConfig = ButtonMappingStore.loadConfiguration(tempFile)
     check(
-        loadedConfig.mode == OperatingMode.MODE_5_UBUNTU_ANKICONNECT &&
+        loadedConfig.podAssignment == PodAssignment.SINGLE_CONTROLLER &&
+            loadedConfig.defaultPresetId == testPreset.id &&
+            loadedConfig.startMinimizedToTray &&
             loadedConfig.ubuntuAnkiConnectPort == 8765 &&
             loadedConfig.floatingHudPillEnabled
     ) {
         "ButtonMappingStore persistence verification failed: $loadedConfig"
     }
     tempFile.delete()
-    println("✓ ButtonMappingStore verification passed")
+    println("✓ PresetStore, PodSelectionPolicy & ButtonMappingStore verification passed")
 
     // 4. Verify OpenBikeControlClient start/stop
     val openBikeClient = OpenBikeControlClient()
@@ -241,12 +253,33 @@ fun main(args: Array<String>) {
         return
     }
 
-    application {
-        var config by remember { mutableStateOf(ButtonMappingStore.loadConfiguration()) }
+    val settingsDir = ButtonMappingStore.defaultSettingsFile().parentFile
+    DiagnosticLogger.configureLogFile(File(settingsDir, "logs/clickcontrol.log"))
+
+    val instance = try {
+        DesktopInstance.open(settingsDir.toPath()) ?: return
+    } catch (e: IOException) {
+        System.err.println("ClickControl could not open its desktop instance lock: ${e.message}")
+        exitProcess(1)
+    }
+    instance.use { showDesktop(it, startMinimizedArg = args.contains("--minimized")) }
+    exitProcess(0)
+}
+
+private fun showDesktop(instance: DesktopInstance, startMinimizedArg: Boolean = false) {
+    application(exitProcessOnExit = false) {
+        val initialConfig = remember {
+            PresetStore.applyStartupDefaultPreset(ButtonMappingStore.loadConfiguration())
+        }
+        var config by remember { mutableStateOf(initialConfig) }
         var isBridgeRunning by remember { mutableStateOf(false) }
-        var isMainWindowVisible by remember { mutableStateOf(true) }
+        var isMainWindowVisible by remember {
+            mutableStateOf(!(startMinimizedArg || initialConfig.startMinimizedToTray))
+        }
+        var reopenRequests by remember { mutableIntStateOf(0) }
         var presetDirty by remember { mutableStateOf(false) }
         var confirmQuit by remember { mutableStateOf(false) }
+        val mainWindowState = rememberWindowState(width = 1180.dp, height = 820.dp)
 
         val scope = rememberCoroutineScope()
         val openBikeClient = remember { OpenBikeControlClient() }
@@ -269,31 +302,57 @@ fun main(args: Array<String>) {
         val bleController = remember { DesktopZwiftBleController() }
 
         val bleState by bleController.connectionState.collectAsState()
+        val bleWorkerError by bleController.lastWorkerError.collectAsState()
         val connectedRightMac by bleController.connectedRightMac.collectAsState()
         val connectedLeftMac by bleController.connectedLeftMac.collectAsState()
+        val discoveredAddresses by bleController.discoveredAddresses.collectAsState()
         val lastActionText by actionRouter.lastRoutedActionLabel.collectAsState()
         val connectedClientCount by openBikeClient.connectedClientCountFlow.collectAsState()
+        val openBikeServerRunning by openBikeClient.isServerRunningFlow.collectAsState()
+        val openBikeBoundPort by openBikeClient.boundPortFlow.collectAsState()
+        val openBikeServerError by openBikeClient.lastServerErrorFlow.collectAsState()
+
+        val syncOpenBikeServer: (Boolean, AppConfiguration) -> Unit = { running, cfg ->
+            val shouldServe = running && PresetStore.activePresetUsesMyWhoosh(cfg)
+            if (!shouldServe) {
+                if (openBikeClient.isServerRunningFlow.value) {
+                    DiagnosticLogger.info(
+                        LogCategory.MYWHOOSH,
+                        "Stopping OpenBikeControl server (active preset does not use MyWhoosh)"
+                    )
+                    openBikeClient.stopServer()
+                }
+            } else if (!openBikeClient.isServerRunningFlow.value || openBikeClient.boundPort() != cfg.openBikeServerPort) {
+                openBikeClient.stopServer()
+                openBikeClient.startServer(cfg.openBikeServerPort)
+            }
+        }
 
         val updateConfig: (AppConfiguration) -> Unit = { newConfig ->
             config = newConfig
             ButtonMappingStore.saveConfiguration(newConfig)
             bleController.updateConfiguration(newConfig)
+            syncOpenBikeServer(isBridgeRunning, newConfig)
+        }
+
+        fun stopBridge() {
+            synchronized(DesktopGenericInputDispatcher.routingLock) {
+                isBridgeRunning = false
+                DesktopGenericInputDispatcher.cancelAllPending()
+            }
+            bleController.disconnect()
+            openBikeClient.stopServer()
         }
 
         val toggleBridge: () -> Unit = {
             if (isBridgeRunning) {
-                synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) {
-                    isBridgeRunning = false
-                    com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending()
-                }
-                bleController.disconnect()
-                openBikeClient.stopServer()
+                stopBridge()
                 DiagnosticLogger.info(LogCategory.SYSTEM, "Bridge stopped by user")
             } else {
-                openBikeClient.startServer(config.openBikeServerPort)
-                bleController.startScanAndConnect(config)
                 isBridgeRunning = true
-                DiagnosticLogger.info(LogCategory.SYSTEM, "Bridge started by user")
+                syncOpenBikeServer(true, config)
+                bleController.startScanAndConnect(config)
+                DiagnosticLogger.info(LogCategory.SYSTEM, "Bridge started (preset='${PresetStore.activePresetName(config)}')")
             }
         }
 
@@ -309,52 +368,93 @@ fun main(args: Array<String>) {
             }
         }
 
-        // Programmatic Tray Icon
-        val trayPainter = remember { createTrayPainter() }
-        if (java.awt.SystemTray.isSupported()) Tray(
-            icon = trayPainter,
-            tooltip = "ClickControl — Zwift Click v2",
-            menu = {
-                Item(
-                    text = if (isBridgeRunning) "Bridge: Active (Click to Stop)" else "Bridge: Stopped (Click to Start)",
-                    onClick = toggleBridge
-                )
-                Item(
-                    text = if (isMainWindowVisible) "Hide Main Window" else "Show Main Window",
-                    onClick = { isMainWindowVisible = !isMainWindowVisible }
-                )
-                Item(
-                    text = if (config.floatingHudPillEnabled) "Hide Floating HUD" else "Show Floating HUD",
-                    onClick = {
-                        updateConfig(config.copy(floatingHudPillEnabled = !config.floatingHudPillEnabled))
-                    }
-                )
-                Separator()
-                Item(
-                    text = "Quit ClickControl",
-                    onClick = {
-                        if (presetDirty) { isMainWindowVisible = true; confirmQuit = true }
-                        else {
-                            if (isBridgeRunning) { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer() }
-                            exitApplication()
-                        }
-                    }
-                )
-            }
-        )
+        fun showWindow() {
+            isMainWindowVisible = true
+            mainWindowState.isMinimized = false
+            reopenRequests++
+        }
 
-        // Main Desktop Window
-        val mainWindowState = rememberWindowState(width = 1320.dp, height = 880.dp)
+        fun quit() {
+            stopBridge()
+            exitApplication()
+        }
+
+        fun requestQuit() {
+            if (presetDirty) {
+                showWindow()
+                confirmQuit = true
+            } else {
+                quit()
+            }
+        }
+
+        LaunchedEffect(instance) {
+            while (instance.awaitReopen()) showWindow()
+        }
+
+        val traySnapshot = TraySnapshot(
+            running = isBridgeRunning,
+            bleState = bleState,
+            activePresetId = config.activePresetId ?: "",
+            hudEnabled = config.floatingHudPillEnabled,
+            presets = config.presets.map { it.id to it.name }
+        )
+        val trayController = remember {
+            DesktopTrayController(
+                onShowWindow = ::showWindow,
+                onToggleBridge = toggleBridge,
+                onSelectPreset = { id ->
+                    updateConfig(config.copy(activePresetId = id))
+                },
+                onToggleHud = {
+                    updateConfig(config.copy(floatingHudPillEnabled = !config.floatingHudPillEnabled))
+                },
+                onQuit = ::requestQuit
+            )
+        }
+        DisposableEffect(Unit) {
+            trayController.start(traySnapshot)
+            if (!isMainWindowVisible) {
+                if (trayController.isActive) {
+                    DiagnosticLogger.info(LogCategory.SYSTEM, "ClickControl started minimized in the top-bar tray")
+                } else {
+                    DiagnosticLogger.warn(LogCategory.SYSTEM, "System tray unavailable; showing ClickControl window")
+                    isMainWindowVisible = true
+                }
+            }
+            onDispose { trayController.close() }
+        }
+        LaunchedEffect(traySnapshot) {
+            trayController.update(traySnapshot)
+        }
+
+        val windowIconPainter = remember { createWindowIconPainter() }
         Window(
+            visible = isMainWindowVisible,
             onCloseRequest = {
-                if (java.awt.SystemTray.isSupported()) isMainWindowVisible = false
-                else if (presetDirty) confirmQuit = true
-                else { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }
+                if (isBridgeRunning && trayController.isActive) {
+                    isMainWindowVisible = false
+                } else if (isBridgeRunning) {
+                    mainWindowState.isMinimized = true
+                } else {
+                    requestQuit()
+                }
             },
             state = mainWindowState,
-            visible = isMainWindowVisible,
-            title = "ClickControl — Zwift Click v2 Desktop (Ubuntu / macOS / Windows)"
+            title = "ClickControl",
+            icon = windowIconPainter
         ) {
+            LaunchedEffect(reopenRequests, isMainWindowVisible) {
+                if (isMainWindowVisible && reopenRequests > 0) {
+                    mainWindowState.isMinimized = false
+                    window.isVisible = true
+                    window.extendedState = window.extendedState and java.awt.Frame.ICONIFIED.inv()
+                    window.isAlwaysOnTop = true
+                    window.toFront()
+                    window.requestFocus()
+                    window.isAlwaysOnTop = false
+                }
+            }
             MaterialTheme(colorScheme = com.ankiride.bridge.ui.ClickControlColors) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -369,9 +469,22 @@ fun main(args: Array<String>) {
                         connectedRightMac = connectedRightMac,
                         connectedLeftMac = connectedLeftMac,
                         hasMyWhooshClient = connectedClientCount > 0,
+                        openBikeServerRunning = openBikeServerRunning,
+                        openBikeEndpoint = openBikeClient.lanEndpointSummary(openBikeBoundPort ?: config.openBikeServerPort),
+                        openBikeServiceName = openBikeClient.serviceName,
+                        openBikeError = openBikeServerError,
+                        bleWorkerError = bleWorkerError,
                         lastRoutedActionLabel = lastActionText,
-                        onMinimizeToTray = { if (java.awt.SystemTray.isSupported()) isMainWindowVisible = false },
+                        onMinimize = { mainWindowState.isMinimized = true },
+                        onEnsureBridgeStarted = {
+                            if (!isBridgeRunning) {
+                                toggleBridge()
+                            } else {
+                                syncOpenBikeServer(true, config)
+                            }
+                        },
                         onPresetDirtyChange = { presetDirty = it },
+                        discoveredAddresses = discoveredAddresses,
                         onSimulateGesture = { button, pressType ->
                             bleController.emitSimulatedGesture(button, pressType)
                         },
@@ -390,7 +503,7 @@ fun main(args: Array<String>) {
                         onDismissRequest = { confirmQuit = false },
                         title = { Text("Discard unsaved changes?") },
                         text = { Text("Save your preset before quitting, or discard the changes.") },
-                        confirmButton = { TextButton(onClick = { synchronized(com.ankiride.bridge.service.DesktopGenericInputDispatcher.routingLock) { isBridgeRunning = false; com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPending() }; bleController.disconnect(); openBikeClient.stopServer(); exitApplication() }) { Text("Discard and quit") } },
+                        confirmButton = { TextButton(onClick = ::quit) { Text("Discard and quit") } },
                         dismissButton = { TextButton(onClick = { confirmQuit = false }) { Text("Keep editing") } }
                     )
                 }
@@ -401,7 +514,7 @@ fun main(args: Array<String>) {
         FloatingHudDesktopWindow(
             enabled = config.floatingHudPillEnabled,
             bleState = bleState,
-            mode = config.mode,
+            presetName = PresetStore.activePresetName(config),
             lastActionText = lastActionText,
             onClose = {
                 updateConfig(config.copy(floatingHudPillEnabled = false))

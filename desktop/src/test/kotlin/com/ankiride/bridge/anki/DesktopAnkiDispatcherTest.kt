@@ -116,6 +116,27 @@ class DesktopAnkiDispatcherTest {
     }
 
     @Test
+    fun testAnkiWebPresetRoutesViaAnkiWebKeyboardBridge() {
+        val preset = com.ankiride.bridge.core.PresetStore.createFromTemplate(
+            com.ankiride.bridge.core.PresetTemplate.ANKI_WEB,
+            com.ankiride.bridge.core.PlatformCapabilities.desktop()
+        )
+        val sentKeys = mutableListOf<com.ankiride.bridge.core.PortableKey>()
+        val webBridge = AnkiWebKeyboardBridge(sendKey = { sentKeys.add(it); true })
+        var activeConfig = AppConfiguration(presets = listOf(preset), activePresetId = preset.id)
+        val dispatcher = DesktopAnkiDispatcher(configProvider = { activeConfig }, ankiWebBridge = webBridge)
+
+        assertTrue(dispatcher.dispatch(AnkiAction.FLIP_OR_GOOD))
+        assertEquals(listOf(com.ankiride.bridge.core.PortableKey.SPACE), sentKeys)
+        assertTrue(webBridge.isAnswerVisible)
+
+        val preset2 = preset.copy(id = "web-2")
+        activeConfig = AppConfiguration(presets = listOf(preset, preset2), activePresetId = preset2.id)
+        assertTrue(dispatcher.dispatch(AnkiAction.FLIP_OR_GOOD))
+        assertEquals(listOf(com.ankiride.bridge.core.PortableKey.SPACE, com.ankiride.bridge.core.PortableKey.SPACE), sentKeys)
+    }
+
+    @Test
     fun queuedActionsArePreserved() {
         val dispatcher = DesktopAnkiDispatcher(configProvider = { AppConfiguration() })
         val latch = java.util.concurrent.CountDownLatch(1)

@@ -1,7 +1,6 @@
 package com.ankiride.bridge.ui
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,43 +10,56 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ankiride.bridge.ble.DesktopZwiftBleController
 import com.ankiride.bridge.core.*
-import com.ankiride.bridge.mywhoosh.DesktopMyWhooshRobot
+import com.ankiride.bridge.mywhoosh.OpenBikeProtocol
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
-private enum class StudioInspectorTab(val title: String) {
-    KEYMAP("Button Keymap (All 10)"),
-    NETWORK("Network & Tests (:8765 / :21587)"),
-    HARDWARE("Auto-Start & Hardware"),
-    LOGS("Live Logs")
+private enum class DesktopPage(val title: String, val subtitle: String, val icon: ImageVector) {
+    CONTROL("Control", "Controller status, active preset & quick actions", Icons.Default.Home),
+    PRESETS("Presets", "Templates and button mappings", Icons.Default.Tune),
+    SETTINGS("Settings", "Connections, startup, desktop input & diagnostics", Icons.Default.Settings)
 }
 
-/**
- * Option A — Studio Split-Pane Desktop UI for ClickControl.
- * Features:
- * - Persistent Top Telemetry & Lifecycle Bar
- * - 5-Mode Selector Strip
- * - Left Studio Pane: Verified Physical Zwift Click v2 Dual-Pod 2D Visualizer (5 Circular Buttons per Pod + Top-Right Blue Sub-Badges + Diagonal Corner Lugs + Diamond Guide Lines)
- * - Right Studio Pane: Tabbed Inspector (10-Button Keymap, Network & 1-Click Tests, Auto-Start & Hardware, Live Logs)
- */
+internal object DesktopLauncherPaths {
+    fun resolveExecutable(): File? {
+        val candidates = listOfNotNull(
+            System.getProperty("jpackage.app-path")?.let(::File),
+            ProcessHandle.current().info().command().orElse(null)?.let { cmd ->
+                val f = File(cmd)
+                if (f.name.startsWith("ClickControl", ignoreCase = true)) f else null
+            },
+            File(System.getProperty("user.dir"), "desktop/build/compose/binaries/main/app/ClickControl/bin/ClickControl").canonicalFile,
+            File("/opt/clickcontrol/bin/ClickControl")
+        )
+        return candidates.firstOrNull { it.isFile && it.canExecute() }
+    }
+
+    fun autostartFile(): File = File(System.getProperty("user.home") ?: ".", ".config/autostart/clickcontrol.desktop")
+    fun legacyAutostartFile(): File = File(System.getProperty("user.home") ?: ".", ".config/autostart/ankiride-bridge.desktop")
+}
+
 @Composable
 fun DesktopAppUi(
     config: AppConfiguration,
@@ -58,1646 +70,878 @@ fun DesktopAppUi(
     connectedRightMac: String?,
     connectedLeftMac: String?,
     hasMyWhooshClient: Boolean,
-    onSimulateGesture: (ClickButton, PressType) -> Unit,
-    onTestAnkiAction: (AnkiAction) -> Unit,
-    onTestMyWhooshAction: (MyWhooshAction) -> Unit,
+    openBikeServerRunning: Boolean = false,
+    openBikeEndpoint: String = "",
+    openBikeServiceName: String = OpenBikeProtocol.desktopServiceName(),
+    openBikeError: String? = null,
+    bleWorkerError: String? = null,
+    onSimulateGesture: (ClickButton, PressType) -> Unit = { _, _ -> },
+    onTestAnkiAction: (AnkiAction) -> Unit = {},
+    onTestMyWhooshAction: (MyWhooshAction) -> Unit = {},
     lastRoutedActionLabel: String = "Ready",
-    onMinimizeToTray: () -> Unit = {},
-    onPresetDirtyChange: (Boolean) -> Unit = {}
+    onMinimize: () -> Unit = {},
+    onEnsureBridgeStarted: () -> Unit = {},
+    onPresetDirtyChange: (Boolean) -> Unit = {},
+    discoveredAddresses: List<String> = emptyList()
 ) {
-    var page by remember { mutableStateOf(0) }
+    val capabilities = remember { PlatformCapabilities.desktop() }
+    var page by remember { mutableStateOf(DesktopPage.CONTROL) }
     var presetDirty by remember { mutableStateOf(false) }
     LaunchedEffect(presetDirty) { onPresetDirtyChange(presetDirty) }
-    var pendingPage by remember { mutableStateOf<Int?>(null) }
-    fun navigate(next: Int) { if (page == 1 && next != 1 && presetDirty) pendingPage = next else page = next }
-    var advanced by remember { mutableStateOf(false) }
-    var portText by remember { mutableStateOf(config.ubuntuAnkiConnectPort.toString()) }
-    var showMappings by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text("ClickControl", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
-                Text("Controller bridge for Anki and MyWhoosh", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Button(onClick = onToggleBridge, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (isBridgeRunning) "Stop bridge" else "Start bridge") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Control", "Presets", "Settings").forEachIndexed { index, label ->
-                FilterChip(selected = page == index, onClick = { navigate(index) }, label = { Text(label) }, modifier = Modifier.heightIn(min = 48.dp))
-            }
-        }
-        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
-            val wide = maxWidth >= 900.dp
-            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                if (wide) {
-                    Card(Modifier.width(250.dp).fillMaxHeight()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("Status", style = MaterialTheme.typography.titleLarge)
-                            Text(if (isBridgeRunning) "Bridge running" else "Bridge stopped")
-                            Text("Controller: ${bleState.name.replace('_', ' ').lowercase()}")
-                            Text("Right: ${connectedRightMac ?: "not connected"}")
-                            Text("Left: ${connectedLeftMac ?: "not connected"}")
-                            Text(if (hasMyWhooshClient) "MyWhoosh connected" else "Waiting for MyWhoosh")
-                            HorizontalDivider()
-                            Text("Active preset", style = MaterialTheme.typography.titleMedium)
-                            Text(PresetStore.active(config)?.name ?: "Default")
-                            Text("Last action: $lastRoutedActionLabel", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-                Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    when (page) {
-                        0 -> {
-                            Text("Control", style = MaterialTheme.typography.headlineSmall)
-                            if (!wide) Text("${if (isBridgeRunning) "Running" else "Stopped"} · ${bleState.name.replace('_', ' ').lowercase()} · ${PresetStore.active(config)?.name ?: "Default"}")
-                            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Text("Active preset", style = MaterialTheme.typography.titleMedium)
-                                Text(PresetStore.active(config)?.name ?: "Default")
-                                Text("Last action: $lastRoutedActionLabel", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                OutlinedButton(onClick = { navigate(1) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Edit preset") }
-                            } }
-                            OutlinedButton(onClick = { showMappings = !showMappings }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showMappings) "Hide mappings" else "View mappings") }
-                            if (showMappings) MappingOverview(config)
-                            Text("Test an action", style = MaterialTheme.typography.titleMedium)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = { onTestAnkiAction(AnkiAction.FLIP_CARD) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Test Anki") }
-                                OutlinedButton(onClick = { onTestMyWhooshAction(MyWhooshAction.SHIFT_UP) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Test bike") }
-                            }
-                        }
-                        1 -> PresetEditor(config, onConfigChange, allowAnkiDroid = false, onDirtyChanged = { presetDirty = it })
-                        else -> {
-                            Text("Settings", style = MaterialTheme.typography.headlineSmall)
-                            Text("Controller connection", style = MaterialTheme.typography.titleMedium)
-                            listOf(
-                                Triple(PodAssignment.RIGHT_ANKI_ONLY, true, "Right controller only"),
-                                Triple(PodAssignment.RIGHT_ANKI_LEFT_BIKE, false, "Both controllers"),
-                                Triple(PodAssignment.LEGACY_SHARED, false, "Shared / single link (auto-connect any)")
-                            ).forEach { (assignment, rightOnly, label) ->
-                                val selected = config.podAssignment == assignment
-                                Row(Modifier.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    RadioButton(
-                                        selected = selected,
-                                        onClick = {
-                                            if (!selected) onConfigChange(config.copy(podAssignment = assignment, rightPodOnlyNoZwift = rightOnly))
-                                        }
-                                    )
-                                    Text(label)
-                                }
-                            }
-                            OutlinedTextField(config.ubuntuAnkiConnectHost, { onConfigChange(config.copy(ubuntuAnkiConnectHost = it)) }, label = { Text("AnkiConnect host") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(portText, { portText = it.filter(Char::isDigit); portText.toIntOrNull()?.takeIf { port -> port in 1..65535 }?.let { port -> onConfigChange(config.copy(ubuntuAnkiConnectPort = port)) } }, label = { Text("AnkiConnect port") }, isError = portText.toIntOrNull() !in 1..65535, supportingText = { if (portText.toIntOrNull() !in 1..65535) Text("Enter a port from 1 to 65535") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                            OutlinedButton(onClick = { advanced = !advanced }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
-                            if (advanced) {
-                                StudioHardwareAndAutostartTab(config, connectedRightMac, connectedLeftMac, onConfigChange)
-                                NetworkingTestCard(config = config, onConfigChange = onConfigChange, hasMyWhooshClient = hasMyWhooshClient, onTestAnkiAction = onTestAnkiAction, onTestMyWhooshAction = onTestMyWhooshAction)
-                                StudioDiagnosticLogsTab()
-                                OutlinedButton(onClick = onMinimizeToTray) { Text("Minimize to tray") }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (pendingPage != null) AlertDialog(onDismissRequest = { pendingPage = null }, title = { Text("Discard unsaved changes?") }, text = { Text("Save your preset before leaving, or discard the changes.") }, confirmButton = { TextButton(onClick = { page = pendingPage ?: page; presetDirty = false; pendingPage = null }) { Text("Discard") } }, dismissButton = { TextButton(onClick = { pendingPage = null }) { Text("Keep editing") } })
+    var pendingPage by remember { mutableStateOf<DesktopPage?>(null) }
 
-}
-
-
-@Composable
-private fun TopTelemetryHeaderBar(
-    config: AppConfiguration,
-    onConfigChange: (AppConfiguration) -> Unit,
-    isBridgeRunning: Boolean,
-    onToggleBridge: () -> Unit,
-    bleState: BleConnectionState,
-    connectedRightMac: String?,
-    connectedLeftMac: String?,
-    hasMyWhooshClient: Boolean,
-    lastRoutedActionLabel: String,
-    onMinimizeToTray: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
-        border = BorderStroke(1.dp, Color(0xFF1F2937))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .background(
-                            if (isBridgeRunning) Color(0xFF064E3B) else Color(0xFF1E293B),
-                            RoundedCornerShape(10.dp)
-                        )
-                        .border(
-                            1.dp,
-                            if (isBridgeRunning) Color(0xFF10B981) else Color(0xFF334155),
-                            RoundedCornerShape(10.dp)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "AR",
-                        color = if (isBridgeRunning) Color(0xFF6EE7B7) else Color(0xFF94A3B8),
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 15.sp
-                    )
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "ClickControl",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
-                        )
-                        TelemetryBadge(
-                            text = "BLE: ${bleState.name}",
-                            bgColor = when (bleState) {
-                                BleConnectionState.CONNECTED_BOTH_PODS,
-                                BleConnectionState.CONNECTED_RIGHT_ONLY,
-                                BleConnectionState.CONNECTED_LEFT_ONLY -> Color(0xFF064E3B)
-                                BleConnectionState.SCANNING,
-                                BleConnectionState.CONNECTING,
-                                BleConnectionState.HANDSHAKING -> Color(0xFF78350F)
-                                BleConnectionState.ERROR -> Color(0xFF7F1D1D)
-                                BleConnectionState.DISCONNECTED -> Color(0xFF1E293B)
-                            },
-                            textColor = when (bleState) {
-                                BleConnectionState.CONNECTED_BOTH_PODS,
-                                BleConnectionState.CONNECTED_RIGHT_ONLY,
-                                BleConnectionState.CONNECTED_LEFT_ONLY -> Color(0xFF6EE7B7)
-                                BleConnectionState.SCANNING,
-                                BleConnectionState.CONNECTING,
-                                BleConnectionState.HANDSHAKING -> Color(0xFFFCD34D)
-                                BleConnectionState.ERROR -> Color(0xFFFCA5A5)
-                                BleConnectionState.DISCONNECTED -> Color(0xFF94A3B8)
-                            }
-                        )
-                        TelemetryBadge(
-                            text = if (hasMyWhooshClient) {
-                                "MyWhoosh TCP :${config.openBikeServerPort} CONNECTED"
-                            } else {
-                                "TCP :${config.openBikeServerPort} Waiting (Robot Fallback Ready)"
-                            },
-                            bgColor = if (hasMyWhooshClient) Color(0xFF0C4A6E) else Color(0xFF1E293B),
-                            textColor = if (hasMyWhooshClient) Color(0xFF7DD3FC) else Color(0xFFFCD34D)
-                        )
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        Text(
-                            text = "Right Pod: ${connectedRightMac ?: config.pinnedRightPodMac?.ifBlank { "Scanning..." } ?: "Scanning..."}",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Text(
-                            text = if (config.rightPodOnlyNoZwift) {
-                                "Left Pod: Standby (1-Pod Mode)"
-                            } else {
-                                "Left Pod: ${connectedLeftMac ?: config.pinnedLeftPodMac?.ifBlank { "Scanning..." } ?: "Scanning..."}"
-                            },
-                            color = Color(0xFF94A3B8),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Text(
-                            text = "AnkiConnect: ${config.ubuntuAnkiConnectHost}:${config.ubuntuAnkiConnectPort}",
-                            color = Color(0xFF6EE7B7),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
-            }
-
-            // Center: Last Routed Action Pill
-            Box(
-                modifier = Modifier
-                    .padding(horizontal = 12.dp)
-                    .background(Color(0xFF0B0F19), RoundedCornerShape(10.dp))
-                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "LAST ROUTED",
-                        color = Color(0xFF64748B),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = lastRoutedActionLabel,
-                        color = Color(0xFFFCD34D),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            // Right: Auto-Connect Quick Toggle + Start/Stop Bridge + Minimize to Tray
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        onConfigChange(config.copy(autoStartOnControllerWake = !config.autoStartOnControllerWake))
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(
-                        1.dp,
-                        if (config.autoStartOnControllerWake) Color(0xFF10B981) else Color(0xFF334155)
-                    ),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        text = if (config.autoStartOnControllerWake) "Auto-Connect: ON" else "Auto-Connect: OFF",
-                        color = if (config.autoStartOnControllerWake) Color(0xFF6EE7B7) else Color(0xFF94A3B8),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                Button(
-                    onClick = onToggleBridge,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isBridgeRunning) Color(0xFFBE123C) else Color(0xFF10B981),
-                        contentColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        text = if (isBridgeRunning) "Stop Bridge" else "Start Bridge",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                OutlinedButton(
-                    onClick = onMinimizeToTray,
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, Color(0xFF334155)),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        text = "Tray ▾",
-                        color = Color(0xFFCBD5E1),
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TelemetryBadge(
-    text: String,
-    bgColor: Color,
-    textColor: Color
-) {
-    Box(
-        modifier = Modifier
-            .background(bgColor, RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp)
-    ) {
-        Text(
-            text = text,
-            color = textColor,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-// ===========================================================================
-// 2. 5-MODE OPERATING SELECTOR STRIP
-// ===========================================================================
-
-@Composable
-private fun OperatingModePillStrip(
-    selectedMode: OperatingMode,
-    onSelectMode: (OperatingMode) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        OperatingMode.entries.forEach { mode ->
-            val isSelected = mode == selectedMode
-            Card(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onSelectMode(mode) },
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSelected) Color(0xFF0C4A6E) else Color(0xFF111827)
-                ),
-                border = BorderStroke(
-                    width = if (isSelected) 1.5.dp else 1.dp,
-                    color = if (isSelected) Color(0xFF38BDF8) else Color(0xFF1F2937)
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = mode.shortTitle,
-                            color = if (isSelected) Color(0xFF7DD3FC) else Color(0xFFE2E8F0),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (isSelected) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .background(Color(0xFF38BDF8), CircleShape)
-                            )
-                        }
-                    }
-                    Text(
-                        text = mode.subtitle,
-                        color = if (isSelected) Color(0xFFBAE6FD) else Color(0xFF64748B),
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ===========================================================================
-// 3. LEFT PANE: VERIFIED PHYSICAL ZWIFT CLICK V2 DUAL-POD 2D VISUALIZER
-//    (Exact 5-Circle Geometry per Pod + Diagonal Corner Lugs + Top-Right Blue Badges)
-// ===========================================================================
-
-@Composable
-private fun ZwiftClickV2PhysicalPodsVisualizer(
-    config: AppConfiguration,
-    isBridgeRunning: Boolean,
-    selectedButton: ClickButton,
-    holdSimulationMode: Boolean,
-    onSelectButton: (ClickButton) -> Unit,
-    onToggleHoldMode: (Boolean) -> Unit,
-    onTogglePodMode: () -> Unit,
-    onSimulateGesture: (ClickButton, PressType) -> Unit,
-    onApplyPresetBindings: (Map<ModeButtonBindingKey, MappedTargetAction>, Boolean) -> Unit
-) {
-    val activePressType = if (holdSimulationMode) PressType.LONG_PRESS else PressType.SINGLE_CLICK
-
-    // Top Simulator Controls Row
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            Text(
-                text = "ZWIFT CLICK V2 HARDWARE (5-CIRCLE PODS)",
-                color = Color.White,
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 14.sp
-            )
-            Text(
-                text = "Y Top Cyan • Z Left Orange • A Right Green • B Bottom Pink • + / – Bottom Black Circles",
-                color = Color(0xFF6EE7B7),
-                fontSize = 10.sp
-            )
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Button(
-                onClick = { onToggleHoldMode(false) },
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (!holdSimulationMode) Color(0xFF0EA5E9) else Color(0xFF1E293B),
-                    contentColor = if (!holdSimulationMode) Color(0xFF082F49) else Color(0xFF94A3B8)
-                ),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text("Click (Single)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-            Button(
-                onClick = { onToggleHoldMode(true) },
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (holdSimulationMode) Color(0xFFF59E0B) else Color(0xFF1E293B),
-                    contentColor = if (holdSimulationMode) Color(0xFF082F49) else Color(0xFF94A3B8)
-                ),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text("Hold (450ms)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
+    fun navigate(next: DesktopPage) {
+        if (page == DesktopPage.PRESETS && next != DesktopPage.PRESETS && presetDirty) {
+            pendingPage = next
+        } else {
+            page = next
         }
     }
 
-    // Dual-Pod Stage (Left Pod + Right Pod side-by-side)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // ---------------- LEFT POD (5 Black Circular Buttons: ^, <, >, v, and – Below v) ----------------
-        ZwiftClickPodDiagram(
-            title = if (config.rightPodOnlyNoZwift) "LEFT POD (Standby)" else "LEFT POD (Active)",
-            isActivePod = !config.rightPodOnlyNoZwift,
-            isLedLit = !config.rightPodOnlyNoZwift && isBridgeRunning,
-            topButton = ClickButton.UP,
-            leftButton = ClickButton.LEFT,
-            rightButton = ClickButton.RIGHT,
-            bottomDiamondButton = ClickButton.DOWN,
-            bottomShiftButton = ClickButton.SHIFT_DOWN_LEFT,
-            config = config,
-            activePressType = activePressType,
-            selectedButton = selectedButton,
-            onSelectButton = onSelectButton,
-            onSimulateGesture = onSimulateGesture
-        )
+    var presetDropdownOpen by remember { mutableStateOf(false) }
+    var showMappings by remember { mutableStateOf(true) }
+    var showAdvanced by remember { mutableStateOf(false) }
+    var portText by remember(config.ubuntuAnkiConnectPort) { mutableStateOf(config.ubuntuAnkiConnectPort.toString()) }
+    var openBikePortText by remember(config.openBikeServerPort) { mutableStateOf(config.openBikeServerPort.toString()) }
 
-        // ---------------- RIGHT POD (Y Cyan, Z Orange, A Green, B Pink + Black '+' Below B) ----------------
-        ZwiftClickPodDiagram(
-            title = "RIGHT POD (Primary Active)",
-            isActivePod = true,
-            isLedLit = isBridgeRunning,
-            topButton = ClickButton.Y,
-            leftButton = ClickButton.Z,
-            rightButton = ClickButton.A,
-            bottomDiamondButton = ClickButton.B,
-            bottomShiftButton = ClickButton.SHIFT_UP_RIGHT,
-            config = config,
-            activePressType = activePressType,
-            selectedButton = selectedButton,
-            onSelectButton = onSelectButton,
-            onSimulateGesture = onSimulateGesture
-        )
+    val activePreset = PresetStore.active(config)
+    val hasAnkiActions = activePreset?.bindings?.values?.any { it.ankiAction != null } == true
+    val hasBikeActions = activePreset?.bindings?.values?.any { it.myWhooshAction != null } == true
+    val isWayland = remember { System.getenv("XDG_SESSION_TYPE")?.equals("wayland", true) == true }
+    val testScope = rememberCoroutineScope()
+    var ankiTestCountdown by remember { mutableIntStateOf(0) }
+    var ankiTestJob by remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(activePreset?.id, activePreset?.ankiTarget) {
+        ankiTestJob?.cancel()
+        ankiTestCountdown = 0
     }
+    DisposableEffect(Unit) { onDispose { ankiTestJob?.cancel() } }
 
-    // Bottom Pod Mode & 1-Tap Ergonomic Presets Bar
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF0B0F19)),
-        border = BorderStroke(1.dp, Color(0xFF1E293B))
-    ) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Single-Pod Ergonomic Layout Presets (${config.mode.shortTitle}):",
-                    color = Color(0xFFCBD5E1),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                OutlinedButton(
-                    onClick = onTogglePodMode,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    modifier = Modifier.height(26.dp)
-                ) {
-                    Text(
-                        text = if (config.rightPodOnlyNoZwift) "1-Pod Mode (Right Only)" else "Dual-Pod Mode (Both)",
-                        fontSize = 10.sp
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                // Preset 1: Bottom Pair Shifting (+ Up / B Down) + Y/Z/A Anki
-                OutlinedButton(
-                    onClick = {
-                        val updated = config.customBindings.toMutableMap()
-                        val m = config.mode
-                        updated[ModeButtonBindingKey(m, ClickButton.SHIFT_UP_RIGHT, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_UP
-                        updated[ModeButtonBindingKey(m, ClickButton.B, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_DOWN
-                        updated[ModeButtonBindingKey(m, ClickButton.A, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_GOOD
-                        updated[ModeButtonBindingKey(m, ClickButton.Z, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_AGAIN
-                        updated[ModeButtonBindingKey(m, ClickButton.Y, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_HARD
-                        onApplyPresetBindings(updated, false)
-                        DiagnosticLogger.info(LogCategory.ROUTER, "Applied Preset 1: +/B Shift • Y/Z/A Anki")
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                ) {
-                    Text("Preset 1: +/B Shift • Y/Z/A Anki", fontSize = 10.sp, maxLines = 1)
-                }
-
-                // Preset 2: Vertical Y/B Shift + Horizontal Z/A Anki
-                OutlinedButton(
-                    onClick = {
-                        val updated = config.customBindings.toMutableMap()
-                        val m = config.mode
-                        updated[ModeButtonBindingKey(m, ClickButton.Y, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_UP
-                        updated[ModeButtonBindingKey(m, ClickButton.B, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_DOWN
-                        updated[ModeButtonBindingKey(m, ClickButton.Z, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_AGAIN
-                        updated[ModeButtonBindingKey(m, ClickButton.A, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_GOOD
-                        updated[ModeButtonBindingKey(m, ClickButton.SHIFT_UP_RIGHT, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_EASY
-                        onApplyPresetBindings(updated, false)
-                        DiagnosticLogger.info(LogCategory.ROUTER, "Applied Preset 2: Y/B Shift • Z/A Anki")
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                ) {
-                    Text("Preset 2: Y/B Shift • Z/A Anki", fontSize = 10.sp, maxLines = 1)
-                }
-
-                // Preset 3: Classic Z/A Shift + Y/B Anki
-                OutlinedButton(
-                    onClick = {
-                        val updated = config.customBindings.toMutableMap()
-                        val m = config.mode
-                        updated[ModeButtonBindingKey(m, ClickButton.Z, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_UP
-                        updated[ModeButtonBindingKey(m, ClickButton.A, PressType.SINGLE_CLICK)] = MappedTargetAction.MW_SHIFT_DOWN
-                        updated[ModeButtonBindingKey(m, ClickButton.Y, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_AGAIN
-                        updated[ModeButtonBindingKey(m, ClickButton.B, PressType.SINGLE_CLICK)] = MappedTargetAction.ANKI_FLIP_OR_GOOD
-                        onApplyPresetBindings(updated, true)
-                        DiagnosticLogger.info(LogCategory.ROUTER, "Applied Preset 3: Z/A Shift • Y/B Anki")
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                ) {
-                    Text("Preset 3: Z/A Shift • Y/B Anki", fontSize = 10.sp, maxLines = 1)
-                }
-            }
-        }
-    }
-}
-
-/**
- * Renders a single Zwift Click v2 physical pod matching the official 5-circle diagram:
- * - Light metallic/slate rounded-octagon housing with 4 diagonal strap lugs at 45°/135°/225°/315°
- * - Inner engraved diamond guide lines connecting Top, Left, Right, and Bottom-of-Diamond buttons
- * - 5 identical circular buttons (54.dp diameter):
- *   - Top (y = 14.dp, centered)
- *   - Left (x = 16.dp, y = 66.dp)
- *   - Right (x = 136.dp, y = 66.dp)
- *   - Bottom of Diamond (y = 118.dp, centered)
- *   - Bottom Shift Circle (– or +, y = 178.dp, centered directly below Bottom-of-Diamond)
- * - Each circular button has a floating blue circular badge at its top-right corner.
- */
-@Composable
-private fun ZwiftClickPodDiagram(
-    title: String,
-    isActivePod: Boolean,
-    isLedLit: Boolean,
-    topButton: ClickButton,
-    leftButton: ClickButton,
-    rightButton: ClickButton,
-    bottomDiamondButton: ClickButton,
-    bottomShiftButton: ClickButton,
-    config: AppConfiguration,
-    activePressType: PressType,
-    selectedButton: ClickButton,
-    onSelectButton: (ClickButton) -> Unit,
-    onSimulateGesture: (ClickButton, PressType) -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier.alpha(if (isActivePod) 1f else 0.45f)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(if (isLedLit) Color(0xFF00AEEF) else Color(0xFF475569), CircleShape)
-            )
-            Text(
-                text = title,
-                color = if (isActivePod) Color(0xFFE2E8F0) else Color(0xFF94A3B8),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        // Outer Pod Canvas + 5 Circular Buttons Container
-        Box(
-            modifier = Modifier.size(width = 220.dp, height = 256.dp),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            // 4 Diagonal Mounting Strap Lugs (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
-            Box(
-                modifier = Modifier
-                    .offset(x = (-68).dp, y = 24.dp)
-                    .size(width = 30.dp, height = 22.dp)
-                    .rotate(-42f)
-                    .background(Color(0xFFCBD5E1), RoundedCornerShape(6.dp))
-                    .border(2.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
-            )
-            Box(
-                modifier = Modifier
-                    .offset(x = 68.dp, y = 24.dp)
-                    .size(width = 30.dp, height = 22.dp)
-                    .rotate(42f)
-                    .background(Color(0xFFCBD5E1), RoundedCornerShape(6.dp))
-                    .border(2.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
-            )
-            Box(
-                modifier = Modifier
-                    .offset(x = (-68).dp, y = 166.dp)
-                    .size(width = 30.dp, height = 22.dp)
-                    .rotate(42f)
-                    .background(Color(0xFFCBD5E1), RoundedCornerShape(6.dp))
-                    .border(2.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
-            )
-            Box(
-                modifier = Modifier
-                    .offset(x = 68.dp, y = 166.dp)
-                    .size(width = 30.dp, height = 22.dp)
-                    .rotate(-42f)
-                    .background(Color(0xFFCBD5E1), RoundedCornerShape(6.dp))
-                    .border(2.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
-            )
-
-            // Main Pod Body (Light silver-slate circular housing with bottom chin extension for 5th button)
-            Box(
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .size(width = 200.dp, height = 206.dp)
-                    .background(Color(0xFFE2E8F0), RoundedCornerShape(92.dp))
-                    .border(2.5.dp, Color(0xFF1E293B), RoundedCornerShape(92.dp))
-            )
-            // Bottom Chin Extension Housing for 5th Circular Button (– / +)
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .offset(y = (-4).dp)
-                    .size(width = 82.dp, height = 78.dp)
-                    .background(Color(0xFFE2E8F0), CircleShape)
-                    .border(2.5.dp, Color(0xFF1E293B), CircleShape)
-            )
-
-            // Inner Diamond Guide Lines Canvas
-            Canvas(
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .size(width = 200.dp, height = 206.dp)
-            ) {
-                val cx = size.width / 2f
-                val topPt = Offset(cx, 38f)
-                val leftPt = Offset(42f, 95f)
-                val rightPt = Offset(size.width - 42f, 95f)
-                val bottomPt = Offset(cx, 152f)
-
-                val diamondPath = Path().apply {
-                    moveTo(topPt.x, topPt.y)
-                    lineTo(rightPt.x, rightPt.y)
-                    lineTo(bottomPt.x, bottomPt.y)
-                    lineTo(leftPt.x, leftPt.y)
-                    close()
-                }
-                drawPath(
-                    path = diamondPath,
-                    color = Color(0xFF64748B),
-                    style = Stroke(width = 2.5f)
-                )
-            }
-
-            // 1. TOP DIAMOND CIRCLE BUTTON (^ on Left Pod | Y Cyan on Right Pod)
-            CircularHardwareButton(
-                button = topButton,
-                actionLabel = resolveShortLabel(config, topButton, activePressType),
-                isSelected = selectedButton == topButton,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = 14.dp),
-                onClick = {
-                    onSelectButton(topButton)
-                    onSimulateGesture(topButton, activePressType)
-                }
-            )
-
-            // 2. LEFT DIAMOND CIRCLE BUTTON (< on Left Pod | Z Orange on Right Pod)
-            CircularHardwareButton(
-                button = leftButton,
-                actionLabel = resolveShortLabel(config, leftButton, activePressType),
-                isSelected = selectedButton == leftButton,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset(x = 20.dp, y = 66.dp),
-                onClick = {
-                    onSelectButton(leftButton)
-                    onSimulateGesture(leftButton, activePressType)
-                }
-            )
-
-            // 3. RIGHT DIAMOND CIRCLE BUTTON (> on Left Pod | A Green on Right Pod)
-            CircularHardwareButton(
-                button = rightButton,
-                actionLabel = resolveShortLabel(config, rightButton, activePressType),
-                isSelected = selectedButton == rightButton,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = (-20).dp, y = 66.dp),
-                onClick = {
-                    onSelectButton(rightButton)
-                    onSimulateGesture(rightButton, activePressType)
-                }
-            )
-
-            // 4. BOTTOM-OF-DIAMOND CIRCLE BUTTON (v on Left Pod | B Pink on Right Pod)
-            CircularHardwareButton(
-                button = bottomDiamondButton,
-                actionLabel = resolveShortLabel(config, bottomDiamondButton, activePressType),
-                isSelected = selectedButton == bottomDiamondButton,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = 118.dp),
-                onClick = {
-                    onSelectButton(bottomDiamondButton)
-                    onSimulateGesture(bottomDiamondButton, activePressType)
-                }
-            )
-
-            // 5. BOTTOM SHIFT CIRCLE BUTTON (– on Left Pod below v | + on Right Pod below B)
-            CircularHardwareButton(
-                button = bottomShiftButton,
-                actionLabel = resolveShortLabel(config, bottomShiftButton, activePressType),
-                isSelected = selectedButton == bottomShiftButton,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = 180.dp),
-                onClick = {
-                    onSelectButton(bottomShiftButton)
-                    onSimulateGesture(bottomShiftButton, activePressType)
-                }
-            )
-        }
-    }
-}
-
-/**
- * Renders an authentic 56.dp circular Zwift Click v2 button with:
- * - Main circular button face (Black for ^/</>/v/–/+, Cyan for Y, Orange for Z, Lime Green for A, Hot Pink for B)
- * - Bold white center glyph (Y, Z, A, B, +, –, ^, <, >, v) + compact mapped action label underneath
- * - Floating blue circular sub-badge (`Color(0xFF0284C7)` with white border) at TopEnd (2 o'clock)
- */
-@Composable
-private fun CircularHardwareButton(
-    button: ClickButton,
-    actionLabel: String,
-    isSelected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val bgColor = Color(button.badgeColorHex)
-    val ringColor = if (isSelected) Color(0xFF38BDF8) else Color(0xFF1E293B)
-    val ringWidth = if (isSelected) 3.dp else 1.5.dp
-
-    Box(
-        modifier = modifier.size(62.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        // Main 54.dp Circular Button Cap
-        Box(
-            modifier = Modifier
-                .size(54.dp)
-                .clip(CircleShape)
-                .background(bgColor, CircleShape)
-                .border(ringWidth, ringColor, CircleShape)
-                .clickable { onClick() }
-                .padding(2.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text(
-                    text = button.shortBadge,
-                    color = Color.White,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 15.sp
-                )
-                Text(
-                    text = actionLabel,
-                    color = Color.White.copy(alpha = 0.92f),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 7.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-
-        // Top-Right (2 o'clock) Floating Blue Circular Icon Sub-Badge (matches official diagram)
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .size(20.dp)
-                .clip(CircleShape)
-                .background(Color(0xFF0284C7), CircleShape)
-                .border(1.5.dp, Color.White, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = button.subBadgeGlyph.ifEmpty { button.shortBadge },
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 9.sp
-            )
-        }
-    }
-}
-
-private fun resolveShortLabel(
-    config: AppConfiguration,
-    button: ClickButton,
-    pressType: PressType
-): String {
-    val resolved = if (config.podAssignment != PodAssignment.LEGACY_SHARED) ButtonMappingStore.assignedAction(config.podAssignment, button, pressType) else ButtonMappingStore.resolveAction(
-        mode = config.mode,
-        button = button,
-        pressType = pressType,
-        customBindings = config.customBindings,
-        rightPodOnlyNoZwift = config.rightPodOnlyNoZwift,
-        useZForShiftDownInSinglePodMode = config.useZForShiftDownInSinglePodMode
-    )
-    return resolved.label
-        .replace("MyWhoosh: ", "")
-        .replace("Anki: ", "")
-        .replace("Flip / ", "")
-        .take(9)
-}
-
-// ===========================================================================
-// 4. RIGHT PANE TAB 1: SELECTED BUTTON SPOTLIGHT + FULL 10-BUTTON KEYMAP
-// ===========================================================================
-
-@Composable
-private fun StudioKeymapInspectorTab(
-    config: AppConfiguration,
-    selectedButton: ClickButton,
-    onSelectButton: (ClickButton) -> Unit,
-    onSimulateGesture: (ClickButton, PressType) -> Unit,
-    onUpdateBindings: (Map<ModeButtonBindingKey, MappedTargetAction>) -> Unit
-) {
-    var editingMode by remember(config.mode) { mutableStateOf(config.mode) }
-
-    val allTenButtons = remember {
-        listOf(
-            ClickButton.Y,
-            ClickButton.Z,
-            ClickButton.A,
-            ClickButton.B,
-            ClickButton.SHIFT_UP_RIGHT,
-            ClickButton.SHIFT_DOWN_LEFT,
-            ClickButton.UP,
-            ClickButton.LEFT,
-            ClickButton.RIGHT,
-            ClickButton.DOWN
-        )
-    }
-
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .background(UbuntuColors.Background)
     ) {
-        if (config.podAssignment != PodAssignment.LEGACY_SHARED) {
-            Text("Preset mappings are active. Editing a binding switches to custom legacy mappings.", color = Color(0xFFFCD34D), fontSize = 11.sp)
-        }
-        // Spotlight Card for Currently Selected Physical Button
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0B0F19)),
-            border = BorderStroke(1.dp, Color(0xFF0284C7))
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        val wide = maxWidth >= 860.dp
+
+        Row(modifier = Modifier.fillMaxSize()) {
+            // Ubuntu GNOME Adwaita Navigation Sidebar (wide windows)
+            if (wide) {
+                Surface(
+                    modifier = Modifier.width(252.dp).fillMaxHeight(),
+                    color = UbuntuColors.SidebarSurface
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(Color(selectedButton.badgeColorHex), CircleShape)
-                                .border(1.5.dp, Color.White.copy(alpha = 0.6f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
                             Text(
-                                text = selectedButton.shortBadge,
-                                color = Color.White,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 15.sp
-                            )
-                        }
-                        Column {
-                            Text(
-                                text = "Selected Button: ${selectedButton.displayName}",
-                                color = Color.White,
+                                "ClickControl",
+                                style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
+                                color = UbuntuColors.TextPrimary
                             )
                             Text(
-                                text = "BLE Bitmask: 0x${selectedButton.bitmask.toString(16).uppercase().padStart(4, '0')} • Mode: ${editingMode.shortTitle}",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                "Desktop Controller Bridge",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = UbuntuColors.TextSecondary
                             )
                         }
-                    }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Button(
-                            onClick = { onSimulateGesture(selectedButton, PressType.SINGLE_CLICK) },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) {
-                            Text("Test Click", fontSize = 11.sp)
-                        }
-                        OutlinedButton(
-                            onClick = { onSimulateGesture(selectedButton, PressType.LONG_PRESS) },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) {
-                            Text("Test Hold", fontSize = 11.sp)
-                        }
-                    }
-                }
+                        HorizontalDivider(color = UbuntuColors.Border)
 
-                ColorCodedButtonCard(
-                    mode = editingMode,
-                    button = selectedButton,
-                    customBindings = config.customBindings,
-                    assignment = config.podAssignment,
-                    onSelectAction = { pressType, target ->
-                        val key = ModeButtonBindingKey(editingMode, selectedButton, pressType)
-                        val updated = if (target == null) config.customBindings - key else config.customBindings + (key to target)
-                        onUpdateBindings(updated)
-                    }
-                )
-            }
-        }
-
-        // Mode Filter Strip + Reset Mode Defaults Button
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                OperatingMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = editingMode == mode,
-                        onClick = { editingMode = mode },
-                        label = {
-                            Text(
-                                text = if (mode == config.mode) "★ ${mode.shortTitle}" else mode.shortTitle,
-                                fontSize = 11.sp
-                            )
-                        }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            OutlinedButton(
-                onClick = {
-                    val cleared = config.customBindings.filterKeys { it.mode != editingMode }
-                    onUpdateBindings(cleared)
-                    DiagnosticLogger.info(LogCategory.ROUTER, "Reset ${editingMode.shortTitle} bindings to default")
-                },
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text("Reset Mode Defaults", fontSize = 11.sp)
-            }
-        }
-
-        // All 10 Physical Buttons List
-        allTenButtons.forEach { button ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelectButton(button) }
-            ) {
-                ColorCodedButtonCard(
-                    mode = editingMode,
-                    button = button,
-                    customBindings = config.customBindings,
-                    assignment = config.podAssignment,
-                    onSelectAction = { pressType, target ->
-                        val key = ModeButtonBindingKey(editingMode, button, pressType)
-                        val updated = if (target == null) config.customBindings - key else config.customBindings + (key to target)
-                        onUpdateBindings(updated)
-                    }
-                )
-            }
-        }
-    }
-}
-
-// ===========================================================================
-// 5. RIGHT PANE TAB 2: NETWORK & 1-CLICK END-TO-END ACTION TESTS
-// ===========================================================================
-
-@Composable
-private fun StudioNetworkAndTestsTab(
-    config: AppConfiguration,
-    onConfigChange: (AppConfiguration) -> Unit,
-    hasMyWhooshClient: Boolean,
-    onTestAnkiAction: (AnkiAction) -> Unit,
-    onTestMyWhooshAction: (MyWhooshAction) -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        NetworkingTestCard(
-            config = config,
-            onConfigChange = onConfigChange,
-            hasMyWhooshClient = hasMyWhooshClient,
-            onTestAnkiAction = onTestAnkiAction,
-            onTestMyWhooshAction = onTestMyWhooshAction
-        )
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = "Extended Diagnostics & OpenBikeControl Port",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = config.openBikeServerPort.toString(),
-                        onValueChange = { input ->
-                            val port = input.filter { it.isDigit() }.toIntOrNull() ?: 21587
-                            onConfigChange(config.copy(openBikeServerPort = port))
-                        },
-                        label = { Text("OpenBikeControl TCP Port (Default 21587)") },
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    OutlinedButton(
-                        onClick = { onTestAnkiAction(AnkiAction.UNDO) }
-                    ) {
-                        Text("Test Anki Undo", fontSize = 11.sp)
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            val title = DesktopMyWhooshRobot.inspectFocusedWindow()
-                            DiagnosticLogger.info(LogCategory.SYSTEM, "Active/Focused Desktop Window: $title")
-                        }
-                    ) {
-                        Text("Inspect Focused Window", fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ===========================================================================
-// 6. RIGHT PANE TAB 3: AUTO-START, HARDWARE & MAC PINNING OPTIONS
-// ===========================================================================
-
-@Composable
-private fun StudioHardwareAndAutostartTab(
-    config: AppConfiguration,
-    connectedRightMac: String?,
-    connectedLeftMac: String?,
-    onConfigChange: (AppConfiguration) -> Unit
-) {
-    var osLoginAutostart by remember {
-        mutableStateOf(
-            File(System.getProperty("user.home") ?: ".", ".config/autostart/ankiride-bridge.desktop").exists()
-        )
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = "Auto-Start & Continuous Auto-Connect",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-
-                OptionToggleRow(
-                    title = "Auto-Start Bridge & BLE Auto-Connect on App Launch",
-                    subtitle = "Automatically starts TCP Server (:21587), mDNS, and BLE controller scan on startup",
-                    checked = config.autoStartOnControllerWake,
-                    onCheckedChange = { onConfigChange(config.copy(autoStartOnControllerWake = it)) }
-                )
-
-                OptionToggleRow(
-                    title = "Launch at OS Login (~/.config/autostart)",
-                    subtitle = "Automatically launches ClickControl when you sign in to your desktop session",
-                    checked = osLoginAutostart,
-                    onCheckedChange = { enabled ->
-                        val file = File(System.getProperty("user.home") ?: ".", ".config/autostart/ankiride-bridge.desktop")
-                        try {
-                            if (enabled) {
-                                val launcher = System.getProperty("jpackage.app-path")?.let(::File)
-                                    ?: File("/opt/clickcontrol/bin/ClickControl")
-                                require(launcher.isFile && launcher.canExecute()) { "Install the packaged application before enabling login launch" }
-                                val escapedLauncher = launcher.absolutePath.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%")
-                                file.parentFile?.mkdirs()
-                                file.writeText(
-                                    """
-                                    [Desktop Entry]
-                                    Type=Application
-                                    Name=ClickControl
-                                    Comment=Zwift Click v2 Bridge for Anki & MyWhoosh
-                                    Exec="$escapedLauncher"
-                                    Terminal=false
-                                    X-GNOME-Autostart-enabled=true
-                                    """.trimIndent() + "\n"
-                                )
-                                osLoginAutostart = true
-                                DiagnosticLogger.info(LogCategory.SYSTEM, "Installed OS login autostart entry: ${file.absolutePath}")
-                            } else if (file.exists()) {
-                                check(file.delete()) { "Could not remove autostart entry" }
-                                osLoginAutostart = false
-                                DiagnosticLogger.info(LogCategory.SYSTEM, "Removed OS login autostart entry: ${file.absolutePath}")
-                            }
-                        } catch (e: Exception) {
-                            DiagnosticLogger.warn(LogCategory.SYSTEM, "Could not update autostart file: ${e.message}")
-                        }
-                    }
-                )
-            }
-        }
-
-        DesktopOptionsCard(
-            config = config,
-            onConfigChange = onConfigChange
-        )
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = "Controller MAC Address Pinning & Watchdog",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
-                )
-                Text(
-                    text = "Pinned Right MAC: ${config.pinnedRightPodMac?.ifBlank { "Any (Auto-Discover)" } ?: "Any (Auto-Discover)"} • Left Watchdog: ${config.leftPodAutoReconnectSec}s",
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                var rightAddress by remember(config.pinnedRightPodMac) { mutableStateOf(config.pinnedRightPodMac.orEmpty()) }
-                var leftAddress by remember(config.pinnedLeftPodMac) { mutableStateOf(config.pinnedLeftPodMac.orEmpty()) }
-                var addressError by remember { mutableStateOf("") }
-                Text("Unknown devices appear in Live Logs. Enter the MAC address (or macOS Bluetooth UUID) to assign a side.", fontSize = 12.sp)
-                OutlinedTextField(value = rightAddress, onValueChange = { rightAddress = it }, label = { Text("Right pod address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = leftAddress, onValueChange = { leftAddress = it }, label = { Text("Left pod address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                if (addressError.isNotEmpty()) Text(addressError, color = Color(0xFFFCA5A5), fontSize = 12.sp)
-                OutlinedButton(onClick = {
-                    val right = rightAddress.trim().ifEmpty { null }
-                    val left = leftAddress.trim().ifEmpty { null }
-                    val valid = { value: String? -> value == null || com.ankiride.bridge.ble.DesktopZwiftBleController.isValidMacOrUuid(value) }
-                    if (!valid(right) || !valid(left) || (right != null && right.equals(left, ignoreCase = true))) {
-                        addressError = "Enter distinct valid MAC addresses or Bluetooth UUIDs."
-                    } else {
-                        addressError = ""
-                        onConfigChange(config.copy(pinnedRightPodMac = right, pinnedLeftPodMac = left))
-                    }
-                }) { Text("Save addresses") }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            val rightToPin = connectedRightMac ?: config.pinnedRightPodMac
-                            val leftToPin = connectedLeftMac ?: config.pinnedLeftPodMac
-                            onConfigChange(
-                                config.copy(
-                                    pinnedRightPodMac = rightToPin,
-                                    pinnedLeftPodMac = leftToPin
-                                )
-                            )
-                            DiagnosticLogger.info(LogCategory.BLE, "Pinned controller MACs -> Right: $rightToPin, Left: $leftToPin")
-                        }
-                    ) {
-                        Text("Lock to Connected MAC", fontSize = 11.sp)
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            onConfigChange(config.copy(pinnedRightPodMac = null, pinnedLeftPodMac = null))
-                            DiagnosticLogger.info(LogCategory.BLE, "Cleared pinned controller MAC addresses")
-                        }
-                    ) {
-                        Text("Clear MAC Pin", fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ===========================================================================
-// 7. RIGHT PANE TAB 4: LIVE DIAGNOSTIC LOG VIEWER
-// ===========================================================================
-
-@Composable
-private fun StudioDiagnosticLogsTab() {
-    Column(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        DiagnosticLogViewerCard()
-    }
-}
-
-// ===========================================================================
-// PRESERVED REUSABLE COMPOSABLE CARDS (100% Backwards-Compatible)
-// ===========================================================================
-
-@Composable
-fun NetworkingTestCard(
-    config: AppConfiguration,
-    onConfigChange: (AppConfiguration) -> Unit,
-    hasMyWhooshClient: Boolean,
-    onTestAnkiAction: (AnkiAction) -> Unit,
-    onTestMyWhooshAction: (MyWhooshAction) -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "AnkiConnect (:${config.ubuntuAnkiConnectPort}) & OpenBikeControl (:${config.openBikeServerPort})",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-            Text(
-                text = "Trigger manual test dispatches to ${config.ubuntuAnkiConnectHost}:${config.ubuntuAnkiConnectPort} and inspect OpenBikeControl status.",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Text(text = "Manual Connection & Shifting Tests:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { onTestAnkiAction(AnkiAction.FLIP_CARD) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Test Anki Flip (guiShowAnswer)", fontSize = 11.sp)
-                }
-
-                OutlinedButton(
-                    onClick = { onTestAnkiAction(AnkiAction.FLIP_OR_GOOD) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Test Good (3)", fontSize = 11.sp)
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { onTestMyWhooshAction(MyWhooshAction.SHIFT_UP) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Test Shift Up (+)", fontSize = 11.sp)
-                }
-
-                OutlinedButton(
-                    onClick = { onTestMyWhooshAction(MyWhooshAction.SHIFT_DOWN) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Test Shift Down (–)", fontSize = 11.sp)
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0D1117), RoundedCornerShape(8.dp))
-                    .padding(10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "OpenBikeControl Server: Port ${config.openBikeServerPort} • mDNS _openbikecontrol._tcp.local.",
-                    color = Color(0xFFC9D1D9),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-                Text(
-                    text = if (hasMyWhooshClient) "MyWhoosh: CONNECTED" else "MyWhoosh: WAITING",
-                    color = if (hasMyWhooshClient) Color(0xFF7EE787) else Color(0xFFFFA657),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun DesktopOptionsCard(
-    config: AppConfiguration,
-    onConfigChange: (AppConfiguration) -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Desktop Hardware & Feedback Options",
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-
-            OptionToggleRow(
-                title = "1-Controller Default (Right Pod Only)",
-                subtitle = "Zero 24h sleep lock; switch off to enable both Left and Right pods",
-                checked = config.rightPodOnlyNoZwift,
-                onCheckedChange = { onConfigChange(config.copy(rightPodOnlyNoZwift = it)) }
-            )
-
-            if (config.rightPodOnlyNoZwift) {
-                OptionToggleRow(
-                    title = "Left 'Z' (Orange) Shifts Down in 1-Pod Mode",
-                    subtitle = "Instant shifting in 1-pod mode: Bottom '+' = Shift Up, Left 'Z' = Shift Down, Y/B/A = Anki",
-                    checked = config.useZForShiftDownInSinglePodMode,
-                    onCheckedChange = { onConfigChange(config.copy(useZForShiftDownInSinglePodMode = it)) }
-                )
-            }
-
-            OptionToggleRow(
-                title = "Floating Mini HUD Pill",
-                subtitle = "Always-on-top transparent mini HUD pill floating over MyWhoosh and Anki",
-                checked = config.floatingHudPillEnabled,
-                onCheckedChange = { onConfigChange(config.copy(floatingHudPillEnabled = it)) }
-            )
-
-            OptionToggleRow(
-                title = "Audio Feedback Cues",
-                subtitle = "Plays subtle audio confirmation tones when shifting or reviewing cards",
-                checked = config.audioFeedbackEnabled,
-                onCheckedChange = { onConfigChange(config.copy(audioFeedbackEnabled = it)) }
-            )
-
-            OptionToggleRow(
-                title = "Keyboard Robot Fallback (I / K)",
-                subtitle = "Injects keystrokes 'I' (Shift Up) and 'K' (Shift Down) via java.awt.Robot when no TCP client is connected",
-                checked = config.useMyShiftTouchFallbackWhenNoClient,
-                onCheckedChange = { onConfigChange(config.copy(useMyShiftTouchFallbackWhenNoClient = it)) }
-            )
-        }
-    }
-}
-
-@Composable
-fun OptionToggleRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, fontWeight = FontWeight.Medium, fontSize = 14.sp)
-            Text(
-                text = subtitle,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange
-        )
-    }
-}
-
-@Composable
-fun ColorCodedButtonCard(
-    mode: OperatingMode,
-    button: ClickButton,
-    customBindings: Map<ModeButtonBindingKey, MappedTargetAction>,
-    assignment: PodAssignment = PodAssignment.LEGACY_SHARED,
-    onSelectAction: (PressType, MappedTargetAction?) -> Unit
-) {
-    val singleResolved = if (assignment == PodAssignment.LEGACY_SHARED) ButtonMappingStore.resolveAction(mode, button, PressType.SINGLE_CLICK, customBindings) else ButtonMappingStore.assignedAction(assignment, button, PressType.SINGLE_CLICK)
-    val longResolved = if (assignment == PodAssignment.LEGACY_SHARED) ButtonMappingStore.resolveAction(mode, button, PressType.LONG_PRESS, customBindings) else ButtonMappingStore.assignedAction(assignment, button, PressType.LONG_PRESS)
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .background(Color(button.badgeColorHex), shape = CircleShape)
-                        .border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = button.shortBadge,
-                        color = Color.White,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 14.sp
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = button.displayName,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
-                )
-            }
-
-            GestureActionPickerRow(
-                gestureLabel = "Single Press",
-                resolvedAction = singleResolved,
-                isCustom = customBindings.containsKey(ModeButtonBindingKey(mode, button, PressType.SINGLE_CLICK)),
-                onSelect = { onSelectAction(PressType.SINGLE_CLICK, it) }
-            )
-
-            GestureActionPickerRow(
-                gestureLabel = "Long Press (450ms)",
-                resolvedAction = longResolved,
-                isCustom = customBindings.containsKey(ModeButtonBindingKey(mode, button, PressType.LONG_PRESS)),
-                onSelect = { onSelectAction(PressType.LONG_PRESS, it) }
-            )
-        }
-    }
-}
-
-@Composable
-fun GestureActionPickerRow(
-    gestureLabel: String,
-    resolvedAction: MappedTargetAction,
-    isCustom: Boolean,
-    onSelect: (MappedTargetAction?) -> Unit
-) {
-    var menuExpanded by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = gestureLabel,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = resolvedAction.label,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = when {
-                    resolvedAction.myWhooshAction != null -> Color(0xFF64B5F6)
-                    resolvedAction.ankiAction != null -> Color(0xFF81C784)
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                }
-            )
-        }
-
-        Box {
-            OutlinedButton(onClick = { menuExpanded = true }) {
-                Text(if (isCustom) "Custom ▾" else "Change ▾", fontSize = 11.sp)
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false }
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Reset to Mode Default") },
-                    onClick = {
-                        onSelect(null)
-                        menuExpanded = false
-                    }
-                )
-                MappedTargetAction.entries.filterNot { it == MappedTargetAction.SCREEN_CLICK || it == MappedTargetAction.KEYBOARD_INPUT }.forEach { target ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = target.label,
-                                color = when {
-                                    target.myWhooshAction != null -> Color(0xFF64B5F6)
-                                    target.ankiAction != null -> Color(0xFF81C784)
-                                    else -> Color.Unspecified
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            DesktopPage.entries.forEach { dest ->
+                                val selected = page == dest
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(44.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) UbuntuColors.HighestSurface else Color.Transparent)
+                                        .clickable { navigate(dest) }
+                                        .padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = dest.icon,
+                                        contentDescription = null,
+                                        tint = if (selected) UbuntuColors.YaruOrange else UbuntuColors.TextSecondary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = dest.title,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                        color = if (selected) UbuntuColors.TextPrimary else UbuntuColors.TextSecondary,
+                                        fontSize = 14.sp
+                                    )
                                 }
-                            )
-                        },
-                        onClick = {
-                            onSelect(target)
-                            menuExpanded = false
+                            }
                         }
-                    )
+
+                        Spacer(Modifier.weight(1f))
+
+                        // Pinned Sidebar Telemetry Card
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = UbuntuColors.CardSurface,
+                            border = BorderStroke(1.dp, UbuntuColors.Border),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                val (statusText, statusDot) = when {
+                                    !isBridgeRunning -> "Bridge stopped" to UbuntuColors.TextSecondary
+                                    bleState == BleConnectionState.CONNECTED_BOTH_PODS -> "Both controllers connected" to UbuntuColors.Success
+                                    bleState == BleConnectionState.CONNECTED_RIGHT_ONLY -> "Right controller connected" to UbuntuColors.Success
+                                    bleState == BleConnectionState.CONNECTED_LEFT_ONLY -> "Left controller connected" to UbuntuColors.Success
+                                    bleState == BleConnectionState.ERROR -> "Controller error" to UbuntuColors.Error
+                                    else -> "Searching for controller…" to UbuntuColors.Warning
+                                }
+                                StatusPill(text = statusText, dotColor = statusDot)
+                                Text(
+                                    "Right: ${connectedRightMac ?: "—"}",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = UbuntuColors.TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    "Left: ${connectedLeftMac ?: "—"}",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = UbuntuColors.TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                Text(
+                                    "Preset: ${PresetStore.activePresetName(config)}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = UbuntuColors.TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    "Last: $lastRoutedActionLabel",
+                                    fontSize = 11.sp,
+                                    color = UbuntuColors.TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+                VerticalDivider(color = UbuntuColors.Border, thickness = 1.dp)
+            }
+
+            // Main Content Pane
+            Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                // GNOME AdwHeaderBar
+                Surface(
+                    color = UbuntuColors.SidebarSurface,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = if (wide) page.title else "ClickControl · ${page.title}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = UbuntuColors.TextPrimary
+                                )
+                                Text(
+                                    text = page.subtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = UbuntuColors.TextSecondary
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = onMinimize,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.heightIn(min = 40.dp)
+                                ) {
+                                    Text("Minimize")
+                                }
+                                Button(
+                                    onClick = onToggleBridge,
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isBridgeRunning) UbuntuColors.ElevatedSurface else Color(0xFFC74312),
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.heightIn(min = 40.dp)
+                                ) {
+                                    Text(if (isBridgeRunning) "Stop bridge" else "Start bridge", fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+
+                        if (!wide) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp)
+                                    .padding(bottom = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                DesktopPage.entries.forEach { dest ->
+                                    FilterChip(
+                                        selected = page == dest,
+                                        onClick = { navigate(dest) },
+                                        label = { Text(dest.title) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = UbuntuColors.YaruOrangeContainer,
+                                            selectedLabelColor = UbuntuColors.TextPrimary
+                                        ),
+                                        modifier = Modifier.heightIn(min = 40.dp)
+                                    )
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = UbuntuColors.Border)
+                    }
+                }
+
+                // Scrollable Page Body
+                val lastIssue by DiagnosticLogger.lastIssue.collectAsState()
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
+                    when (page) {
+                        DesktopPage.CONTROL -> {
+                            val activeErrorBanner = openBikeError
+                                ?: bleWorkerError
+                                ?: lastIssue?.takeIf { it.level == LogLevel.ERROR || it.level == LogLevel.WARN }?.let {
+                                    "${it.category.name}: ${it.message}"
+                                }
+                            if (!activeErrorBanner.isNullOrBlank()) {
+                                val isErrorLevel = openBikeError != null || bleWorkerError != null || lastIssue?.level == LogLevel.ERROR
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isErrorLevel) MaterialTheme.colorScheme.errorContainer else UbuntuColors.YaruOrangeContainer,
+                                    border = BorderStroke(1.dp, if (isErrorLevel) UbuntuColors.Error else UbuntuColors.YaruOrange),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = activeErrorBanner,
+                                            color = if (isErrorLevel) MaterialTheme.colorScheme.onErrorContainer else UbuntuColors.TextPrimary,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.weight(1f).padding(end = 12.dp)
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    showAdvanced = true
+                                                    navigate(DesktopPage.SETTINGS)
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) { Text("Logs") }
+                                            TextButton(onClick = { DiagnosticLogger.dismissLastIssue() }) {
+                                                Text("Dismiss")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            AdwPreferencesGroup(
+                                title = "Quick Setup (No External App Required)",
+                                description = "Pick how your Ubuntu laptop and Pixel work together."
+                            ) {
+                                val isOptionBActive = config.podAssignment == PodAssignment.BOTH_CONTROLLERS && hasBikeActions
+                                val isOptionCActive = config.podAssignment == PodAssignment.SINGLE_CONTROLLER && !hasBikeActions
+                                AdwActionRow(
+                                    title = "Option B · Laptop Bridges Both Controllers (Wi-Fi to Pixel)",
+                                    subtitle = if (openBikeServerRunning) {
+                                        "Ready — pair '$openBikeServiceName' at $openBikeEndpoint in MyWhoosh → Devices → Controllers"
+                                    } else {
+                                        "Connects both controllers on Ubuntu: 4 arrows for Docs/Web/Slides, second controller shifts MyWhoosh over Wi-Fi"
+                                    },
+                                    trailing = {
+                                        if (isOptionBActive) {
+                                            StatusPill("Active", UbuntuColors.Success)
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val targetPreset = config.presets.firstOrNull {
+                                                        it.bindings.values.any { act -> act.myWhooshAction != null } &&
+                                                            it.bindings.values.any { act -> act.isGenericInput || act.ankiAction != null }
+                                                    } ?: PresetStore.createFromTemplate(PresetTemplate.RIDE_WEB_SLIDES, capabilities)
+                                                    val nextPresets = if (config.presets.any { it.id == targetPreset.id }) config.presets else config.presets + targetPreset
+                                                    onConfigChange(
+                                                        config.copy(
+                                                            presets = nextPresets,
+                                                            activePresetId = targetPreset.id,
+                                                            podAssignment = PodAssignment.BOTH_CONTROLLERS
+                                                        )
+                                                    )
+                                                    onEnsureBridgeStarted()
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) { Text("Use Option B") }
+                                        }
+                                    }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwActionRow(
+                                    title = "Option C · Split Devices (Laptop = Anki/Docs · Pixel = MyWhoosh)",
+                                    subtitle = "Connects only your single pinned laptop controller and stops Ubuntu's OpenBikeControl server so your Pixel handles shifting cleanly",
+                                    trailing = {
+                                        if (isOptionCActive) {
+                                            StatusPill("Active", UbuntuColors.Success)
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val studyPreset = config.presets.firstOrNull { preset ->
+                                                        preset.bindings.values.none { it.myWhooshAction != null } &&
+                                                            preset.bindings.values.any { it != MappedTargetAction.NONE }
+                                                    } ?: PresetStore.createFromTemplate(PresetTemplate.DOCUMENT_SCROLL, capabilities)
+                                                    val nextPresets = if (config.presets.any { it.id == studyPreset.id }) config.presets else config.presets + studyPreset
+                                                    onConfigChange(
+                                                        config.copy(
+                                                            presets = nextPresets,
+                                                            activePresetId = studyPreset.id,
+                                                            podAssignment = PodAssignment.SINGLE_CONTROLLER
+                                                        )
+                                                    )
+                                                    onEnsureBridgeStarted()
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) { Text("Use Option C") }
+                                        }
+                                    }
+                                )
+                            }
+
+                            AdwPreferencesGroup(title = "Controller & Bridge Status") {
+                                val bleStatus = when (bleState) {
+                                    BleConnectionState.DISCONNECTED -> "Disconnected"
+                                    BleConnectionState.SCANNING -> "Scanning for Zwift Click…"
+                                    BleConnectionState.CONNECTING -> "Connecting…"
+                                    BleConnectionState.HANDSHAKING -> "Completing handshake…"
+                                    BleConnectionState.CONNECTED_RIGHT_ONLY -> "Right pod connected"
+                                    BleConnectionState.CONNECTED_LEFT_ONLY -> "Left pod connected"
+                                    BleConnectionState.CONNECTED_BOTH_PODS -> "Both pods connected"
+                                    BleConnectionState.ERROR -> bleWorkerError ?: "Connection error (see Diagnostic Log)"
+                                }
+                                AdwActionRow(
+                                    title = if (isBridgeRunning) "Bridge active" else "Bridge stopped",
+                                    subtitle = "$bleStatus · Right: ${connectedRightMac ?: "not connected"} · Left: ${connectedLeftMac ?: "not connected"}",
+                                    trailing = {
+                                        StatusPill(
+                                            text = if (isBridgeRunning) "Running" else "Stopped",
+                                            dotColor = if (isBridgeRunning) UbuntuColors.Success else UbuntuColors.TextSecondary
+                                        )
+                                    }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwActionRow(
+                                    title = "Last action",
+                                    subtitle = "Most recent button press or hold sent from your controller",
+                                    trailing = {
+                                        Text(
+                                            text = lastRoutedActionLabel,
+                                            color = UbuntuColors.YaruOrange,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwActionRow(
+                                    title = "MyWhoosh OpenBikeControl ($openBikeServiceName)",
+                                    subtitle = when {
+                                        openBikeError != null -> openBikeError
+                                        hasMyWhooshClient -> "Connected on $openBikeEndpoint"
+                                        isBridgeRunning && openBikeServerRunning -> "Waiting for MyWhoosh at $openBikeEndpoint (allow TCP ${config.openBikeServerPort} if firewall is on)"
+                                        isBridgeRunning && !hasBikeActions -> "Disabled automatically for this preset (keeps Pixel ClickControl free in Option C)"
+                                        else -> "Stopped (auto-starts on TCP ${config.openBikeServerPort} when preset uses MyWhoosh)"
+                                    },
+                                    trailing = {
+                                        StatusPill(
+                                            text = when {
+                                                openBikeError != null -> "Error"
+                                                hasMyWhooshClient -> "Connected"
+                                                isBridgeRunning && openBikeServerRunning -> "Waiting"
+                                                isBridgeRunning && !hasBikeActions -> "Standby"
+                                                else -> "Stopped"
+                                            },
+                                            dotColor = when {
+                                                openBikeError != null -> UbuntuColors.Error
+                                                hasMyWhooshClient -> UbuntuColors.Info
+                                                isBridgeRunning && openBikeServerRunning -> UbuntuColors.Warning
+                                                else -> UbuntuColors.TextSecondary
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+
+                            AdwPreferencesGroup(title = "Active Preset") {
+                                val targetLabel = when (capabilities.normalizeAnkiTarget(activePreset?.ankiTarget ?: AnkiTarget.ANKICONNECT)) {
+                                    AnkiTarget.ANKIWEB -> "AnkiWeb (Browser)"
+                                    else -> "Desktop Anki (AnkiConnect)"
+                                }
+                                AdwActionRow(
+                                    title = PresetStore.activePresetName(config),
+                                    subtitle = if (hasAnkiActions) "Anki destination: $targetLabel" else "Switch presets anytime without reconnecting your controller",
+                                    trailing = {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Box {
+                                                OutlinedButton(
+                                                    onClick = { presetDropdownOpen = true },
+                                                    shape = RoundedCornerShape(8.dp)
+                                                ) {
+                                                    Text("Switch ▾")
+                                                }
+                                                DropdownMenu(
+                                                    expanded = presetDropdownOpen,
+                                                    onDismissRequest = { presetDropdownOpen = false }
+                                                ) {
+                                                    config.presets.forEach { preset ->
+                                                        DropdownMenuItem(
+                                                            text = { Text(preset.name) },
+                                                            onClick = {
+                                                                onConfigChange(config.copy(activePresetId = preset.id))
+                                                                presetDropdownOpen = false
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            OutlinedButton(
+                                                onClick = { navigate(DesktopPage.PRESETS) },
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) {
+                                                Text("Edit")
+                                            }
+                                        }
+                                    }
+                                )
+                                if (hasAnkiActions || hasBikeActions) {
+                                    HorizontalDivider(color = UbuntuColors.Border)
+                                    AdwActionRow(
+                                        title = "Quick actions test",
+                                        subtitle = "Verify your target app responds before riding or studying",
+                                        trailing = {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                if (hasAnkiActions) {
+                                                    val isWebAnki = capabilities.normalizeAnkiTarget(activePreset?.ankiTarget ?: AnkiTarget.ANKICONNECT) == AnkiTarget.ANKIWEB
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            if (!isWebAnki) {
+                                                                onTestAnkiAction(AnkiAction.FLIP_CARD)
+                                                            } else if (ankiTestCountdown > 0) {
+                                                                ankiTestJob?.cancel()
+                                                                ankiTestCountdown = 0
+                                                            } else {
+                                                                ankiTestJob = testScope.launch {
+                                                                    try {
+                                                                        for (i in 3 downTo 1) {
+                                                                            ankiTestCountdown = i
+                                                                            delay(1000)
+                                                                        }
+                                                                        onTestAnkiAction(AnkiAction.FLIP_CARD)
+                                                                    } finally {
+                                                                        ankiTestCountdown = 0
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    ) {
+                                                        Text(
+                                                            when {
+                                                                ankiTestCountdown > 0 -> "Focus browser ($ankiTestCountdown)…"
+                                                                isWebAnki -> "Test Anki in 3s"
+                                                                else -> "Test Anki"
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                                if (hasBikeActions) {
+                                                    OutlinedButton(
+                                                        onClick = { onTestMyWhooshAction(MyWhooshAction.SHIFT_UP) },
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    ) {
+                                                        Text("Test bike")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Current Button Map",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                TextButton(onClick = { showMappings = !showMappings }) {
+                                    Text(if (showMappings) "Hide" else "Show")
+                                }
+                            }
+                            if (showMappings) {
+                                MappingOverview(config)
+                            }
+                        }
+
+                        DesktopPage.PRESETS -> {
+                            PresetEditor(
+                                config = config,
+                                onChange = onConfigChange,
+                                allowAnkiDroid = false,
+                                onDirtyChanged = { presetDirty = it }
+                            )
+                        }
+
+                        DesktopPage.SETTINGS -> {
+                            AdwPreferencesGroup(
+                                title = "Controller Connection",
+                                description = "Choose whether ClickControl captures a single controller or both pods."
+                            ) {
+                                val choices = listOf(
+                                    PodAssignment.SINGLE_CONTROLLER to ("Single controller (Option C)" to "Connects only one controller (honors your pinned address so a second controller stays free for Pixel ClickControl)."),
+                                    PodAssignment.RIGHT_CONTROLLER_ONLY to ("Right controller only" to "Connects only a right-side controller and ignores left/4-arrow pods."),
+                                    PodAssignment.BOTH_CONTROLLERS to ("Both controllers (Option B)" to "Connects both left and right pods through this laptop.")
+                                )
+                                choices.forEachIndexed { idx, (assignment, labels) ->
+                                    val selected = config.podAssignment == assignment
+                                    AdwRadioRow(
+                                        title = labels.first,
+                                        subtitle = labels.second,
+                                        selected = selected,
+                                        onClick = {
+                                            if (!selected) {
+                                                onConfigChange(config.copy(podAssignment = assignment))
+                                            }
+                                        }
+                                    )
+                                    if (idx < choices.lastIndex) HorizontalDivider(color = UbuntuColors.Border)
+                                }
+                            }
+
+                            AdwPreferencesGroup(
+                                title = "Anki Desktop (AnkiConnect)",
+                                description = "Used by presets whose destination is Desktop Anki. For browser AnkiWeb, choose AnkiWeb on the preset itself."
+                            ) {
+                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                        OutlinedTextField(
+                                            value = config.ubuntuAnkiConnectHost,
+                                            onValueChange = { onConfigChange(config.copy(ubuntuAnkiConnectHost = it)) },
+                                            label = { Text("Host") },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(2f)
+                                        )
+                                        OutlinedTextField(
+                                            value = portText,
+                                            onValueChange = { raw ->
+                                                portText = raw.filter(Char::isDigit)
+                                                portText.toIntOrNull()?.takeIf { it in 1..65535 }?.let { port ->
+                                                    onConfigChange(config.copy(ubuntuAnkiConnectPort = port))
+                                                }
+                                            },
+                                            label = { Text("Port") },
+                                            isError = portText.toIntOrNull() !in 1..65535,
+                                            supportingText = { if (portText.toIntOrNull() !in 1..65535) Text("1–65535") },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedButton(onClick = { onTestAnkiAction(AnkiAction.FLIP_CARD) }) {
+                                            Text("Test AnkiConnect")
+                                        }
+                                    }
+                                }
+                            }
+
+                            AdwPreferencesGroup(title = "Startup, Tray & Feedback") {
+                                var startupPresetMenuOpen by remember { mutableStateOf(false) }
+                                val startupLabel = config.defaultPresetId
+                                    ?.let { id -> config.presets.firstOrNull { it.id == id }?.name }
+                                    ?: "Last used preset"
+                                AdwActionRow(
+                                    title = "Default preset on launch",
+                                    subtitle = "Automatically select this preset every time ClickControl starts",
+                                    trailing = {
+                                        Box {
+                                            OutlinedButton(onClick = { startupPresetMenuOpen = true }, shape = RoundedCornerShape(8.dp)) {
+                                                Text("$startupLabel ▾")
+                                            }
+                                            DropdownMenu(expanded = startupPresetMenuOpen, onDismissRequest = { startupPresetMenuOpen = false }) {
+                                                DropdownMenuItem(
+                                                    text = { Text("Last used preset") },
+                                                    onClick = {
+                                                        onConfigChange(config.copy(defaultPresetId = null))
+                                                        startupPresetMenuOpen = false
+                                                    }
+                                                )
+                                                config.presets.forEach { preset ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(preset.name) },
+                                                        onClick = {
+                                                            onConfigChange(config.copy(defaultPresetId = preset.id))
+                                                            startupPresetMenuOpen = false
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwSwitchRow(
+                                    title = "Auto-start bridge on launch",
+                                    subtitle = "Start scanning for controllers automatically when ClickControl opens",
+                                    checked = config.autoStartOnControllerWake,
+                                    onCheckedChange = { onConfigChange(config.copy(autoStartOnControllerWake = it)) }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwSwitchRow(
+                                    title = "Start minimized in top-bar tray",
+                                    subtitle = "Hide window to the top bar on launch (ideal with auto-start)",
+                                    checked = config.startMinimizedToTray,
+                                    onCheckedChange = { onConfigChange(config.copy(startMinimizedToTray = it)) }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwSwitchRow(
+                                    title = "Floating mini status bar",
+                                    subtitle = "Compact always-on-top status pill showing active preset and last action",
+                                    checked = config.floatingHudPillEnabled,
+                                    onCheckedChange = { onConfigChange(config.copy(floatingHudPillEnabled = it)) }
+                                )
+                                HorizontalDivider(color = UbuntuColors.Border)
+                                AdwSwitchRow(
+                                    title = "Audio feedback cues",
+                                    subtitle = "Play subtle confirmation tones on controller presses",
+                                    checked = config.audioFeedbackEnabled,
+                                    onCheckedChange = { onConfigChange(config.copy(audioFeedbackEnabled = it)) }
+                                )
+                                if (capabilities.supportsLinuxAutostart) {
+                                    HorizontalDivider(color = UbuntuColors.Border)
+                                    var osLoginAutostart by remember {
+                                        mutableStateOf(
+                                            DesktopLauncherPaths.autostartFile().exists() ||
+                                                DesktopLauncherPaths.legacyAutostartFile().exists()
+                                        )
+                                    }
+                                    var autostartError by remember { mutableStateOf("") }
+                                    AdwSwitchRow(
+                                        title = "Launch at Ubuntu login",
+                                        subtitle = "Starts ClickControl automatically when you log into Ubuntu",
+                                        checked = osLoginAutostart,
+                                        onCheckedChange = { enabled ->
+                                            val file = DesktopLauncherPaths.autostartFile()
+                                            val legacyFile = DesktopLauncherPaths.legacyAutostartFile()
+                                            try {
+                                                if (enabled) {
+                                                    val launcher = DesktopLauncherPaths.resolveExecutable()
+                                                        ?: error("Built ClickControl launcher not found. Run ./start-clickcontrol.sh first.")
+                                                    val escapedLauncher = launcher.absolutePath.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%")
+                                                    val args = if (config.startMinimizedToTray) " --minimized" else ""
+                                                    file.parentFile?.mkdirs()
+                                                    file.writeText(
+                                                        """
+                                                        [Desktop Entry]
+                                                        Type=Application
+                                                        Name=ClickControl
+                                                        Comment=Zwift Click Controller Bridge
+                                                        Exec="$escapedLauncher"$args
+                                                        Terminal=false
+                                                        X-GNOME-Autostart-enabled=true
+                                                        """.trimIndent() + "\n"
+                                                    )
+                                                    if (legacyFile.exists()) legacyFile.delete()
+                                                    osLoginAutostart = true
+                                                    autostartError = ""
+                                                    DiagnosticLogger.info(LogCategory.SYSTEM, "Installed OS login autostart entry: ${file.absolutePath}")
+                                                } else {
+                                                    if (file.exists()) check(file.delete()) { "Could not remove ${file.absolutePath}" }
+                                                    if (legacyFile.exists()) legacyFile.delete()
+                                                    osLoginAutostart = false
+                                                    autostartError = ""
+                                                    DiagnosticLogger.info(LogCategory.SYSTEM, "Removed OS login autostart entry: ${file.absolutePath}")
+                                                }
+                                            } catch (e: Exception) {
+                                                autostartError = e.message ?: "Failed to update login autostart"
+                                                DiagnosticLogger.error(LogCategory.SYSTEM, autostartError)
+                                            }
+                                        }
+                                    )
+                                    if (autostartError.isNotEmpty()) {
+                                        Text(
+                                            text = autostartError,
+                                            color = UbuntuColors.Error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            AdwPreferencesGroup(
+                                title = "MyWhoosh OpenBikeControl (Option B)",
+                                description = "Starts automatically whenever the active preset uses MyWhoosh actions."
+                            ) {
+                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = "Service name: $openBikeServiceName · LAN endpoint: ${openBikeEndpoint.ifBlank { "port ${config.openBikeServerPort}" }}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = UbuntuColors.TextSecondary
+                                    )
+                                    OutlinedTextField(
+                                        value = openBikePortText,
+                                        onValueChange = { raw ->
+                                            openBikePortText = raw.filter(Char::isDigit)
+                                            openBikePortText.toIntOrNull()?.takeIf { it in 1..65535 }?.let { port ->
+                                                onConfigChange(config.copy(openBikeServerPort = port))
+                                            }
+                                        },
+                                        label = { Text("OpenBikeControl TCP Port") },
+                                        isError = openBikePortText.toIntOrNull() !in 1..65535,
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { showAdvanced = !showAdvanced },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.heightIn(min = 42.dp)
+                            ) {
+                                Text(if (showAdvanced) "Hide advanced & diagnostics" else "Advanced & diagnostics")
+                            }
+
+                            if (showAdvanced) {
+                                AdwPreferencesGroup(
+                                    title = "Controller Hardware Pinning",
+                                    description = "Optional: lock specific MAC addresses (Linux/Windows) or Bluetooth UUIDs (macOS) to Right or Left."
+                                ) {
+                                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        if (discoveredAddresses.isNotEmpty()) {
+                                            Text("Discovered devices (click to copy into Right or check logs):", style = MaterialTheme.typography.bodySmall, color = UbuntuColors.TextSecondary)
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                discoveredAddresses.forEach { addr ->
+                                                    AssistChip(
+                                                        onClick = { onConfigChange(config.copy(pinnedRightPodMac = addr)) },
+                                                        label = { Text(addr, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        var rightAddress by remember(config.pinnedRightPodMac) { mutableStateOf(config.pinnedRightPodMac.orEmpty()) }
+                                        var leftAddress by remember(config.pinnedLeftPodMac) { mutableStateOf(config.pinnedLeftPodMac.orEmpty()) }
+                                        var addressError by remember { mutableStateOf("") }
+                                        OutlinedTextField(
+                                            value = rightAddress,
+                                            onValueChange = { rightAddress = it },
+                                            label = { Text("Pinned Right address") },
+                                            singleLine = true,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        OutlinedTextField(
+                                            value = leftAddress,
+                                            onValueChange = { leftAddress = it },
+                                            label = { Text("Pinned Left address") },
+                                            singleLine = true,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        if (addressError.isNotEmpty()) {
+                                            Text(addressError, color = UbuntuColors.Error, fontSize = 12.sp)
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Button(onClick = {
+                                                val right = rightAddress.trim().ifEmpty { null }
+                                                val left = leftAddress.trim().ifEmpty { null }
+                                                val valid = { value: String? -> value == null || DesktopZwiftBleController.isValidMacOrUuid(value) }
+                                                if (!valid(right) || !valid(left) || (right != null && right.equals(left, ignoreCase = true))) {
+                                                    addressError = "Enter distinct valid MAC addresses or Bluetooth UUIDs."
+                                                } else {
+                                                    addressError = ""
+                                                    onConfigChange(config.copy(pinnedRightPodMac = right, pinnedLeftPodMac = left))
+                                                }
+                                            }) { Text("Save addresses") }
+
+                                            OutlinedButton(onClick = {
+                                                onConfigChange(
+                                                    config.copy(
+                                                        pinnedRightPodMac = connectedRightMac ?: config.pinnedRightPodMac,
+                                                        pinnedLeftPodMac = connectedLeftMac ?: config.pinnedLeftPodMac
+                                                    )
+                                                )
+                                            }) { Text("Lock connected") }
+
+                                            OutlinedButton(onClick = {
+                                                rightAddress = ""
+                                                leftAddress = ""
+                                                addressError = ""
+                                                onConfigChange(config.copy(pinnedRightPodMac = null, pinnedLeftPodMac = null))
+                                            }) { Text("Clear pins") }
+                                        }
+                                    }
+                                }
+
+                                DiagnosticLogViewerCard()
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    if (pendingPage != null) {
+        AlertDialog(
+            onDismissRequest = { pendingPage = null },
+            title = { Text("Discard unsaved changes?") },
+            text = { Text("Save your preset before leaving, or discard the changes.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    page = pendingPage ?: page
+                    presetDirty = false
+                    pendingPage = null
+                }) { Text("Discard") }
+            },
+            dismissButton = { TextButton(onClick = { pendingPage = null }) { Text("Keep editing") } }
+        )
     }
 }
 
@@ -1710,56 +954,47 @@ fun DiagnosticLogViewerCard() {
         if (selectedCategory == null) logs else logs.filter { it.category == selectedCategory }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    val logPath = DiagnosticLogger.logFilePath()
+    AdwPreferencesGroup(
+        title = "Diagnostic Log (${filteredLogs.size})",
+        description = if (logPath != null) "Saved to $logPath" else "Real-time Bluetooth events, routing, and Anki / MyWhoosh dispatches."
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "Live Diagnostic Log (${filteredLogs.size})",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                    Text(
-                        text = "Real-time BLE packets, key injections, and OpenBikeControl events",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val text = DiagnosticLogger.formatForClipboard(selectedCategory)
+                    val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+                    clipboard.setContents(StringSelection(text), null)
+                    DiagnosticLogger.info(LogCategory.SYSTEM, "Copied ${filteredLogs.size} logs to system clipboard")
+                }) { Text("Copy Logs", fontSize = 12.sp) }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            val text = DiagnosticLogger.formatForClipboard(selectedCategory)
-                            val clipboard = Toolkit.getDefaultToolkit().systemClipboard
-                            clipboard.setContents(StringSelection(text), null)
-                            DiagnosticLogger.info(LogCategory.SYSTEM, "Copied ${filteredLogs.size} logs to system clipboard")
+                OutlinedButton(
+                    enabled = logPath != null,
+                    onClick = {
+                        val path = logPath ?: return@OutlinedButton
+                        try {
+                            val file = File(path)
+                            file.parentFile?.mkdirs()
+                            if (!file.exists()) file.createNewFile()
+                            val isLinux = System.getProperty("os.name", "").lowercase().contains("linux")
+                            if (isLinux) {
+                                ProcessBuilder("xdg-open", file.absolutePath).start()
+                            } else if (java.awt.Desktop.isDesktopSupported()) {
+                                java.awt.Desktop.getDesktop().open(file)
+                            } else {
+                                DiagnosticLogger.warn(LogCategory.SYSTEM, "Open Log File is unsupported on this OS (${file.absolutePath})")
+                            }
+                        } catch (e: Exception) {
+                            DiagnosticLogger.warn(LogCategory.SYSTEM, "Could not open log file $path: ${e.message}")
                         }
-                    ) {
-                        Text("Copy Logs", fontSize = 11.sp)
                     }
+                ) { Text("Open Log File", fontSize = 12.sp) }
 
-                    OutlinedButton(
-                        onClick = { DiagnosticLogger.clear() }
-                    ) {
-                        Text("Clear", fontSize = 11.sp)
-                    }
-                }
+                OutlinedButton(onClick = { DiagnosticLogger.clear() }) { Text("Clear", fontSize = 12.sp) }
             }
 
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FilterChip(
@@ -1783,19 +1018,19 @@ fun DiagnosticLogViewerCard() {
                 }
             }
 
-            val logScrollState = rememberScrollState()
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(340.dp)
-                    .background(Color(0xFF0D1117), shape = RoundedCornerShape(8.dp))
+                    .height(280.dp)
+                    .background(UbuntuColors.TerminalSurface, shape = RoundedCornerShape(8.dp))
+                    .border(1.dp, UbuntuColors.Border, shape = RoundedCornerShape(8.dp))
                     .padding(10.dp)
-                    .verticalScroll(logScrollState)
+                    .verticalScroll(rememberScrollState())
             ) {
                 if (filteredLogs.isEmpty()) {
                     Text(
-                        text = "No log entries yet. Click 'Start Bridge' or simulate button gestures to see live events.",
-                        color = Color(0xFF8B949E),
+                        text = "No log entries yet. Start the bridge to see live events.",
+                        color = UbuntuColors.TextSecondary,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp
                     )
@@ -1803,9 +1038,9 @@ fun DiagnosticLogViewerCard() {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         filteredLogs.takeLast(150).reversed().forEach { entry ->
                             val color = when (entry.level) {
-                                LogLevel.ERROR -> Color(0xFFFF7B72)
-                                LogLevel.WARN -> Color(0xFFD29922)
-                                LogLevel.INFO -> Color(0xFFC9D1D9)
+                                LogLevel.ERROR -> UbuntuColors.Error
+                                LogLevel.WARN -> UbuntuColors.Warning
+                                LogLevel.INFO -> UbuntuColors.TextPrimary
                             }
                             Text(
                                 text = "[${entry.formattedTime}] [${entry.category.name}] ${entry.message}",

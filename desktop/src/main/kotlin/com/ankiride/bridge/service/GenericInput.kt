@@ -3,6 +3,8 @@ package com.ankiride.bridge.service
 import com.ankiride.bridge.core.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.awt.GraphicsEnvironment
 import java.awt.Robot
@@ -82,26 +84,104 @@ internal class GuardedInputDriver(private val delegate: InputDriver, private val
     override fun keyRelease(code: Int) = delegate.keyRelease(code)
 }
 
-internal class OrderedInputQueue(scope: CoroutineScope, private val execute: suspend (MappedTargetAction, InputConfig, () -> Boolean) -> Unit) {
+internal data class QueuedInput(
+    val generation: Long,
+    val allRepeatsGeneration: Long,
+    val buttonRepeatGeneration: Long,
+    val sourceButton: ClickButton?,
+    val action: MappedTargetAction,
+    val config: InputConfig,
+    val isRepeat: Boolean = false
+)
+
+internal class OrderedInputQueue(
+    scope: CoroutineScope,
+    private val execute: suspend (MappedTargetAction, InputConfig, () -> Boolean) -> Unit
+) {
     private val generation = AtomicLong()
-    private val queue = Channel<Triple<Long, MappedTargetAction, InputConfig>>(64)
-    init { scope.launch {
-        for ((queuedGeneration, action, config) in queue) {
-            if (queuedGeneration == generation.get()) execute(action, config) { queuedGeneration == generation.get() }
+    private val allRepeatsGeneration = AtomicLong()
+    private val buttonRepeatGenerations = ConcurrentHashMap<ClickButton, AtomicLong>()
+    private val inFlight = AtomicBoolean(false)
+    private val queue = Channel<QueuedInput>(64)
+
+    private fun counterFor(button: ClickButton?): AtomicLong? =
+        button?.canonicalButton?.let { buttonRepeatGenerations.computeIfAbsent(it) { AtomicLong() } }
+
+    private fun isItemValid(item: QueuedInput): Boolean {
+        if (item.generation != generation.get()) return false
+        if (!item.isRepeat) return true
+        if (item.allRepeatsGeneration != allRepeatsGeneration.get()) return false
+        val btnCounter = item.sourceButton?.let { buttonRepeatGenerations[it] } ?: return true
+        return item.buttonRepeatGeneration == btnCounter.get()
+    }
+
+    init {
+        scope.launch {
+            for (item in queue) {
+                if (!isItemValid(item)) continue
+                if (item.isRepeat && inFlight.get()) continue
+                inFlight.set(true)
+                try {
+                    execute(item.action, item.config) { isItemValid(item) }
+                } finally {
+                    inFlight.set(false)
+                }
+            }
         }
-    } }
-    fun cancelPending() { generation.incrementAndGet() }
-    fun enqueue(action: MappedTargetAction, config: InputConfig) = queue.trySend(Triple(generation.get(), action, config)).isSuccess
+    }
+
+    fun cancelPendingRepeats(button: ClickButton? = null) {
+        if (button == null) {
+            allRepeatsGeneration.incrementAndGet()
+        } else {
+            counterFor(button)?.incrementAndGet()
+        }
+    }
+
+    fun cancelAllPending() {
+        generation.incrementAndGet()
+        allRepeatsGeneration.incrementAndGet()
+    }
+
+    fun cancelPending() = cancelAllPending()
+
+    fun enqueue(
+        action: MappedTargetAction,
+        config: InputConfig,
+        isRepeat: Boolean = false,
+        sourceButton: ClickButton? = null
+    ): Boolean {
+        if (isRepeat && inFlight.get()) return true
+        val canonical = sourceButton?.canonicalButton
+        val btnGen = counterFor(canonical)?.get() ?: 0L
+        return queue.trySend(
+            QueuedInput(
+                generation = generation.get(),
+                allRepeatsGeneration = allRepeatsGeneration.get(),
+                buttonRepeatGeneration = btnGen,
+                sourceButton = canonical,
+                action = action,
+                config = config,
+                isRepeat = isRepeat
+            )
+        ).isSuccess
+    }
 }
 
 object DesktopGenericInputDispatcher : GenericInputDispatcher {
     val routingLock = Any()
+    private val capabilities = PlatformCapabilities.desktop()
     private val wayland = WaylandInputBackend()
     private val isWayland get() = System.getenv("XDG_SESSION_TYPE")?.equals("wayland", true) == true
-    val inputStatus: String get() = if (isWayland) wayland.status else "Desktop input uses the graphical session"
-    init { Runtime.getRuntime().addShutdownHook(Thread { wayland.close() }) }
+    val inputStatus: String
+        get() = if (isWayland) wayland.status else "Desktop input ready (graphical session)"
+
+    init {
+        Runtime.getRuntime().addShutdownHook(Thread { wayland.close() })
+    }
+
     internal fun executeNow(action: MappedTargetAction, config: InputConfig, valid: () -> Boolean = { true }) {
-        require(config.validFor(action))
+        require(capabilities.isValidInputConfig(action, config))
         if (isWayland) {
             val needsBounds = !config.clickAtPointer && (action == MappedTargetAction.SCREEN_CLICK || (action == MappedTargetAction.SCREEN_SCROLL && config.width > 0f && config.height > 0f))
             val bounds = if (needsBounds) waylandBounds() else java.awt.Rectangle(1, 1)
@@ -116,26 +196,42 @@ object DesktopGenericInputDispatcher : GenericInputDispatcher {
             performInput(GuardedInputDriver(driver, valid), action, config, bounds)
         }
     }
+
     private val queue = OrderedInputQueue(CoroutineScope(SupervisorJob() + Dispatchers.IO)) { action, config, valid ->
         try {
             executeNow(action, config, valid)
-            DiagnosticLogger.info(LogCategory.ROUTER, "Generic input sent to desktop; delivery depends on the focused application")
+            DiagnosticLogger.info(LogCategory.ROUTER, "Desktop input sent; delivery depends on the focused window")
         } catch (_: CancellationException) {
-            // Stop invalidated this action before it could emit more input.
+            // Stop or release invalidated this action before it could emit more input.
         } catch (e: Exception) {
             if (isWayland) wayland.reportFailure(e)
-            DiagnosticLogger.error(LogCategory.ROUTER, "Generic input failed: ${e.message}")
+            DiagnosticLogger.error(LogCategory.ROUTER, "Desktop input failed: ${e.message}")
         }
     }
-    fun cancelPending() = queue.cancelPending()
-    override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean {
-        if (!config.validFor(action)) return false
+
+    fun cancelPendingRepeats(button: ClickButton? = null) = queue.cancelPendingRepeats(button)
+    fun cancelAllPending() = queue.cancelAllPending()
+    fun cancelPending() = cancelAllPending()
+
+    override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean =
+        dispatch(action, config, isRepeat = false, sourceButton = null)
+
+    override fun dispatch(action: MappedTargetAction, config: InputConfig, isRepeat: Boolean): Boolean =
+        dispatch(action, config, isRepeat = isRepeat, sourceButton = null)
+
+    override fun dispatch(
+        action: MappedTargetAction,
+        config: InputConfig,
+        isRepeat: Boolean,
+        sourceButton: ClickButton?
+    ): Boolean {
+        if (!capabilities.isValidInputConfig(action, config)) return false
         if (!isWayland && GraphicsEnvironment.isHeadless()) {
-            DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input unavailable: no display")
+            DiagnosticLogger.warn(LogCategory.ROUTER, "Desktop input unavailable: no graphical display")
             return false
         }
-        val accepted = queue.enqueue(action, config)
-        if (!accepted) DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input queue is full")
+        val accepted = queue.enqueue(action, config, isRepeat, sourceButton)
+        if (!accepted) DiagnosticLogger.warn(LogCategory.ROUTER, "Desktop input queue is full")
         return accepted
     }
 }

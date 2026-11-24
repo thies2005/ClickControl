@@ -17,6 +17,8 @@ class AnkiConnectClient {
         const val SOCKET_TIMEOUT_MS = 1200
         const val FLIP_TO_GRADE_GUARD_MS = 350L
         const val MAX_RESPONSE_CHARS = 8192
+        private val RESULT_FALSE = Regex("\"result\"\\s*:\\s*false\\b")
+        private val ERROR_NULL = Regex("\"error\"\\s*:\\s*null\\b")
     }
 
     @Volatile
@@ -47,7 +49,7 @@ class AnkiConnectClient {
                 if (ok) {
                     isAnswerVisible = true
                     lastFlipTimestampMs = nowMs
-                    DiagnosticLogger.info(LogCategory.ANKI, "Ubuntu AnkiConnect ($cleanHost:$port): Flipped card (guiShowAnswer)")
+                    DiagnosticLogger.info(LogCategory.ANKI, "AnkiConnect ($cleanHost:$port): Flipped card (guiShowAnswer)")
                 }
                 ok
             }
@@ -55,7 +57,7 @@ class AnkiConnectClient {
                 val ok = sendJsonRpc(cleanHost, port, """{"action":"guiUndo","version":6}""")
                 if (ok) {
                     isAnswerVisible = false
-                    DiagnosticLogger.info(LogCategory.ANKI, "Ubuntu AnkiConnect ($cleanHost:$port): Undid last card (guiUndo)")
+                    DiagnosticLogger.info(LogCategory.ANKI, "AnkiConnect ($cleanHost:$port): Undid last card (guiUndo)")
                 }
                 ok
             }
@@ -78,13 +80,13 @@ class AnkiConnectClient {
             if (flipped) {
                 isAnswerVisible = true
                 lastFlipTimestampMs = nowMs
-                DiagnosticLogger.info(LogCategory.ANKI, "Ubuntu AnkiConnect ($host:$port): 1st press -> guiShowAnswer (armed 350ms guard)")
+                DiagnosticLogger.info(LogCategory.ANKI, "AnkiConnect ($host:$port): 1st press -> guiShowAnswer (armed 350ms guard)")
             }
             return flipped
         }
 
         if ((nowMs - lastFlipTimestampMs) < FLIP_TO_GRADE_GUARD_MS) {
-            DiagnosticLogger.warn(LogCategory.ANKI, "Ubuntu AnkiConnect: Bounce Guard (350ms) blocked double-press for $label")
+            DiagnosticLogger.warn(LogCategory.ANKI, "AnkiConnect: Bounce Guard (350ms) blocked double-press for $label")
             return false
         }
 
@@ -95,31 +97,31 @@ class AnkiConnectClient {
         ) ?: return false
 
         // Self-healing check: if Desktop Anki was still on Question side, guiAnswerCard returns "result": false
-        if (Regex("\"result\"\\s*:\\s*false").containsMatchIn(response)) {
+        if (ERROR_NULL.containsMatchIn(response) && RESULT_FALSE.containsMatchIn(response)) {
             isAnswerVisible = false
             val flipped = sendJsonRpc(host, port, """{"action":"guiShowAnswer","version":6}""")
             if (flipped) {
                 isAnswerVisible = true
                 lastFlipTimestampMs = nowMs
             }
-            DiagnosticLogger.info(LogCategory.ANKI, "Ubuntu AnkiConnect ($host:$port): Card was on Question side -> auto-called guiShowAnswer")
+            DiagnosticLogger.info(LogCategory.ANKI, "AnkiConnect ($host:$port): Card was on Question side -> auto-called guiShowAnswer")
             return flipped
         }
 
-        val ok = Regex("\"error\"\\s*:\\s*null").containsMatchIn(response)
+        val ok = ERROR_NULL.containsMatchIn(response) && !RESULT_FALSE.containsMatchIn(response)
         if (ok) {
             isAnswerVisible = false
-            DiagnosticLogger.info(LogCategory.ANKI, "Ubuntu AnkiConnect ($host:$port): Graded card -> $label (guiAnswerCard ease=$ease)")
+            DiagnosticLogger.info(LogCategory.ANKI, "AnkiConnect ($host:$port): Graded card -> $label (guiAnswerCard ease=$ease)")
         } else {
-            DiagnosticLogger.warn(LogCategory.ANKI, "Ubuntu AnkiConnect error response: $response")
+            val snippet = response.substringAfter("\r\n\r\n", response).trim().take(160)
+            DiagnosticLogger.warn(LogCategory.ANKI, "AnkiConnect ($host:$port): open a card in review before grading ($snippet)")
         }
         return ok
     }
 
     fun sendJsonRpc(host: String, port: Int, jsonBody: String): Boolean {
         val resp = sendJsonRpcRaw(host, port, jsonBody) ?: return false
-        return Regex("\"error\"\\s*:\\s*null").containsMatchIn(resp) &&
-            !Regex("\"result\"\\s*:\\s*false").containsMatchIn(resp)
+        return ERROR_NULL.containsMatchIn(resp) && !RESULT_FALSE.containsMatchIn(resp)
     }
 
     fun sendJsonRpcRaw(host: String, port: Int, jsonBody: String): String? {
@@ -155,7 +157,12 @@ class AnkiConnectClient {
                 sb.toString()
             }
         } catch (t: Throwable) {
-            DiagnosticLogger.error(LogCategory.ANKI, "Ubuntu AnkiConnect ($host:$port) connection failed: ${t.message}")
+            val reason = when (t) {
+                is java.net.ConnectException -> "Cannot reach Anki Desktop at $host:$port — open Anki and ensure the AnkiConnect add-on (2055492159) is installed."
+                is java.net.SocketTimeoutException -> "AnkiConnect timed out at $host:$port — check that Anki Desktop is responsive and on the same network."
+                else -> "AnkiConnect ($host:$port) connection failed: ${t.message}"
+            }
+            DiagnosticLogger.error(LogCategory.ANKI, reason)
             null
         }
     }

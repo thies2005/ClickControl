@@ -16,6 +16,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "ClickControl"
 
+include(":core")
 include(":desktop")
 
 val skipAndroid = providers.gradleProperty("skipAndroid").orNull?.toBoolean() == true

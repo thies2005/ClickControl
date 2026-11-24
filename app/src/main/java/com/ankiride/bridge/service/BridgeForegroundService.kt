@@ -18,12 +18,14 @@ import com.ankiride.bridge.mywhoosh.OpenBikeControlClient
 import com.ankiride.bridge.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 
 class BridgeForegroundService : Service() {
 
@@ -41,6 +43,15 @@ class BridgeForegroundService : Service() {
         private val _connectionStateFlow = MutableStateFlow(BleConnectionState.DISCONNECTED)
         val connectionStateFlow: StateFlow<BleConnectionState> = _connectionStateFlow.asStateFlow()
 
+        private val _openBikeConnectedClientsFlow = MutableStateFlow(0)
+        val openBikeConnectedClientsFlow: StateFlow<Int> = _openBikeConnectedClientsFlow.asStateFlow()
+
+        private val _openBikeServerRunningFlow = MutableStateFlow(false)
+        val openBikeServerRunningFlow: StateFlow<Boolean> = _openBikeServerRunningFlow.asStateFlow()
+
+        private val _openBikeServerErrorFlow = MutableStateFlow<String?>(null)
+        val openBikeServerErrorFlow: StateFlow<String?> = _openBikeServerErrorFlow.asStateFlow()
+
         var currentConfig: AppConfiguration = AppConfiguration()
             private set
 
@@ -48,9 +59,14 @@ class BridgeForegroundService : Service() {
 
         fun startService(context: Context, config: AppConfiguration) {
             currentConfig = config
-            if (_isRunningFlow.value && activeServiceInstance != null) {
-                activeServiceInstance?.bleController?.updateConfiguration(config)
-                DiagnosticLogger.info(LogCategory.SYSTEM, "Updated live configuration (mode=${config.mode}, 1Pod=${config.rightPodOnlyNoZwift})")
+            val active = activeServiceInstance
+            if (_isRunningFlow.value && active != null) {
+                active.bleController?.updateConfiguration(config)
+                active.syncOpenBikeServer()
+                DiagnosticLogger.info(
+                    LogCategory.SYSTEM,
+                    "Updated live configuration (preset='${PresetStore.activePresetName(config)}', mode=${config.podAssignment.name})"
+                )
                 return
             }
             val intent = Intent(context, BridgeForegroundService::class.java).apply {
@@ -88,11 +104,13 @@ class BridgeForegroundService : Service() {
     private var myWhooshDispatcher: MyWhooshNetworkDispatcherImpl? = null
     private var ankiDispatcher: AnkiActionDispatcherImpl? = null
     private var actionRouter: ActionRouter? = null
+    private val collectJobs = mutableListOf<Job>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLogger.configureLogFile(File(filesDir, "logs/clickcontrol.log"))
         activeServiceInstance = this
         createNotificationChannel()
     }
@@ -107,12 +125,27 @@ class BridgeForegroundService : Service() {
 
         if (_isRunningFlow.value && bleController != null) {
             bleController?.updateConfiguration(currentConfig)
+            syncOpenBikeServer()
             return START_STICKY
         }
 
         startForegroundWithNotification()
         startBridge()
         return START_STICKY
+    }
+
+    internal fun syncOpenBikeServer() {
+        val server = openBikeServer ?: return
+        val shouldServe = _isRunningFlow.value && PresetStore.activePresetUsesMyWhoosh(currentConfig)
+        if (!shouldServe) {
+            if (server.isServerRunningFlow.value) {
+                DiagnosticLogger.info(LogCategory.MYWHOOSH, "Stopping OpenBikeControl server (preset does not use MyWhoosh)")
+                server.stopServer()
+            }
+        } else if (!server.isServerRunningFlow.value || server.boundPort() != currentConfig.openBikeServerPort) {
+            server.stopServer()
+            server.startServer(currentConfig.openBikeServerPort)
+        }
     }
 
     private fun startForegroundWithNotification() {
@@ -126,7 +159,7 @@ class BridgeForegroundService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("ClickControl Active")
-            .setContentText("OpenBikeControl server + Zwift Click controller running")
+            .setContentText("Controller bridge running (${PresetStore.activePresetName(currentConfig)})")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -149,7 +182,6 @@ class BridgeForegroundService : Service() {
 
         val server = OpenBikeControlClient(this, serviceScope)
         openBikeServer = server
-        server.startServer(currentConfig.openBikeServerPort)
 
         val whoosh = MyWhooshNetworkDispatcherImpl(
             client = server,
@@ -174,26 +206,34 @@ class BridgeForegroundService : Service() {
         ankiDispatcher = anki
         actionRouter = router
 
-        serviceScope.launch {
-            ble.connectionState.collect { state ->
-                _connectionStateFlow.value = state
-            }
+        collectJobs += serviceScope.launch {
+            ble.connectionState.collect { state -> _connectionStateFlow.value = state }
+        }
+        collectJobs += serviceScope.launch {
+            server.connectedClientCountFlow.collect { count -> _openBikeConnectedClientsFlow.value = count }
+        }
+        collectJobs += serviceScope.launch {
+            server.isServerRunningFlow.collect { running -> _openBikeServerRunningFlow.value = running }
+        }
+        collectJobs += serviceScope.launch {
+            server.lastServerErrorFlow.collect { err -> _openBikeServerErrorFlow.value = err }
+        }
+        collectJobs += serviceScope.launch {
+            ble.gestureEvents.collect { event -> router.routeGesture(event) }
         }
 
-        serviceScope.launch {
-            ble.gestureEvents.collect { event ->
-                router.routeGesture(event)
-            }
-        }
-
+        syncOpenBikeServer()
         ble.startScanAndConnect(currentConfig)
     }
 
     private fun stopBridge() {
         synchronized(AndroidGenericInputDispatcher.routingLock) {
             _isRunningFlow.value = false
-            AndroidGenericInputDispatcher.cancelPending()
+            AndroidGenericInputDispatcher.cancelAllPending()
         }
+        collectJobs.forEach { it.cancel() }
+        collectJobs.clear()
+
         bleController?.disconnect()
         openBikeServer?.stopServer()
 
@@ -205,6 +245,9 @@ class BridgeForegroundService : Service() {
         actionRouter = null
 
         _connectionStateFlow.value = BleConnectionState.DISCONNECTED
+        _openBikeConnectedClientsFlow.value = 0
+        _openBikeServerRunningFlow.value = false
+        _openBikeServerErrorFlow.value = null
     }
 
     override fun onDestroy() {

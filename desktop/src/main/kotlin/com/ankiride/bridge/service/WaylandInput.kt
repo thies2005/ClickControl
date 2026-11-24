@@ -138,7 +138,8 @@ internal class WaylandInputBackend(
     override fun mouseRelease() = command("click", "0x80")
     override fun mouseWheel(horizontal: Int, vertical: Int) = mouseWheelChecked(horizontal, vertical) { true }
     fun mouseWheelChecked(horizontal: Int, vertical: Int, valid: () -> Boolean) =
-        command("mousemove", "-w", "--", horizontal.toString(), vertical.toString(), valid = valid)
+        // ydotool mousemove -w negates axis values relative to evdev: +vertical scrolls down, while +horizontal scrolls left; negate horizontal to match Robot/screen direction.
+        command("mousemove", "-w", "--", (-horizontal).toString(), vertical.toString(), valid = valid)
     override fun keyPress(code: Int) = keyPressChecked(code) { true }
     fun keyPressChecked(code: Int, valid: () -> Boolean) = command("key", "${evdevKeys[code] ?: error("Unsupported key $code")}:1", valid = valid)
     override fun keyRelease(code: Int) = command("key", "${evdevKeys[code] ?: error("Unsupported key $code")}:0")

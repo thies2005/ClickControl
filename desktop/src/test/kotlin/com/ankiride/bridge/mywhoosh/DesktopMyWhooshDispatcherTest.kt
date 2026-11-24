@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -38,14 +39,10 @@ class DesktopMyWhooshDispatcherTest {
     }
 
     private suspend fun awaitServerPort(server: OpenBikeControlClient, timeoutMs: Long = 2000L): Int {
-        val field = OpenBikeControlClient::class.java.getDeclaredField("serverSocket")
-        field.isAccessible = true
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < timeoutMs) {
-            val srv = field.get(server) as? ServerSocket
-            if (srv != null && srv.localPort > 0) {
-                return srv.localPort
-            }
+            val port = server.boundPort()
+            if (port != null && port > 0) return port
             delay(25L)
         }
         error("Timed out waiting for OpenBikeControl server to bind port")
@@ -91,24 +88,30 @@ class DesktopMyWhooshDispatcherTest {
     }
 
     @Test
-    fun testDispatchFallbackDisabledWhenNoClientConnected() = runBlocking {
-        val config = AppConfiguration(useMyShiftTouchFallbackWhenNoClient = false)
+    fun testDispatchLogsClearMessageWhenNoMyWhooshClientConnected() = runBlocking {
+        DiagnosticLogger.clear()
+        val config = AppConfiguration()
         val ok = dispatcher.dispatch(MyWhooshAction.SHIFT_UP, config)
-        assertFalse("Dispatch should return false when no client connected and fallback is disabled", ok)
+        assertFalse(ok)
+        val logs = DiagnosticLogger.logs.value
+        assertTrue(logs.any { it.category == LogCategory.MYWHOOSH && it.message.contains("MyWhoosh is not connected yet") })
     }
 
     @Test
-    fun testDispatchFallbackInvokedWhenNoClientConnected() = runBlocking {
+    fun testPortConflictReportsActionableBindError() = runBlocking {
         DiagnosticLogger.clear()
-        val config = AppConfiguration(useMyShiftTouchFallbackWhenNoClient = true)
-
-        val result = dispatcher.dispatch(MyWhooshAction.SHIFT_UP, config)
-        if (DesktopMyWhooshRobot.isAvailable()) {
-            assertTrue(result)
-        } else {
-            assertFalse(result)
-            val logs = DiagnosticLogger.logs.value
-            assertTrue(logs.any { it.category == LogCategory.MYWHOOSH && it.message.contains("fallback") })
+        ServerSocket(0).use { busy ->
+            val port = busy.localPort
+            openBikeClient.startServer(port)
+            val deadline = System.currentTimeMillis() + 2000L
+            while (openBikeClient.lastServerErrorFlow.value == null && System.currentTimeMillis() < deadline) {
+                delay(25L)
+            }
+            val err = openBikeClient.lastServerErrorFlow.value
+            assertNotNull(err)
+            assertTrue(err!!.contains("already in use"))
+            val ok = dispatcher.dispatch(MyWhooshAction.SHIFT_UP, AppConfiguration(openBikeServerPort = port))
+            assertFalse(ok)
         }
     }
 }

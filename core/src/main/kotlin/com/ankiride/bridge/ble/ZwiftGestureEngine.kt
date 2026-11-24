@@ -5,8 +5,9 @@ import com.ankiride.bridge.core.ClickButton
 import com.ankiride.bridge.core.PressType
 import java.util.EnumMap
 
-class ZwiftGestureEngine(
+class ZwiftGestureEngine @JvmOverloads constructor(
     private val isRepeatEnabled: (ClickButton) -> Boolean = { false },
+    private val onRepeatReleased: ((ClickButton) -> Unit)? = null,
     private val onGestureDetected: (ButtonGestureEvent) -> Unit
 ) {
     companion object {
@@ -29,7 +30,12 @@ class ZwiftGestureEngine(
 
     @Synchronized
     fun reset() {
-        trackers.values.forEach { it.isPressed = false; it.longPressTriggered = false; it.repeatModeActive = false; it.lastEmittedTime = -1000L }
+        trackers.values.forEach { tracker ->
+            tracker.isPressed = false
+            tracker.longPressTriggered = false
+            tracker.repeatModeActive = false
+            tracker.lastEmittedTime = -1000L
+        }
     }
 
     @Synchronized
@@ -44,7 +50,7 @@ class ZwiftGestureEngine(
                 tracker.repeatModeActive = isRepeatEnabled(button)
                 if (tracker.repeatModeActive && (nowMs - tracker.lastEmittedTime) >= DEBOUNCE_WINDOW_MS) {
                     tracker.lastEmittedTime = nowMs
-                    onGestureDetected(ButtonGestureEvent(button, PressType.SINGLE_CLICK, nowMs))
+                    onGestureDetected(ButtonGestureEvent(button, PressType.SINGLE_CLICK, nowMs, isRepeat = false))
                 }
             } else if (isPressed && tracker.isPressed) {
                 if (tracker.repeatModeActive) {
@@ -53,7 +59,7 @@ class ZwiftGestureEngine(
                     ) {
                         tracker.longPressTriggered = true
                         tracker.lastEmittedTime = nowMs
-                        onGestureDetected(ButtonGestureEvent(button, PressType.SINGLE_CLICK, nowMs))
+                        onGestureDetected(ButtonGestureEvent(button, PressType.SINGLE_CLICK, nowMs, isRepeat = true))
                     }
                 } else if (!tracker.longPressTriggered && (nowMs - tracker.pressStartTime) >= LONG_PRESS_THRESHOLD_MS) {
                     tracker.longPressTriggered = true
@@ -66,12 +72,15 @@ class ZwiftGestureEngine(
                 val wasRepeat = tracker.repeatModeActive
                 tracker.isPressed = false
                 tracker.repeatModeActive = false
-                if (!wasRepeat) {
+                if (wasRepeat) {
+                    onRepeatReleased?.invoke(button)
+                } else {
                     val holdDuration = nowMs - tracker.pressStartTime
-                    if (!tracker.longPressTriggered && holdDuration >= LONG_PRESS_THRESHOLD_MS) {
+                    if (!tracker.longPressTriggered && holdDuration >= LONG_PRESS_THRESHOLD_MS &&
+                        (nowMs - tracker.lastEmittedTime) >= DEBOUNCE_WINDOW_MS) {
                         tracker.lastEmittedTime = nowMs
                         onGestureDetected(ButtonGestureEvent(button, PressType.LONG_PRESS, nowMs))
-                    } else if (!tracker.longPressTriggered) {
+                    } else if (!tracker.longPressTriggered && holdDuration < LONG_PRESS_THRESHOLD_MS) {
                         if ((nowMs - tracker.lastEmittedTime) >= DEBOUNCE_WINDOW_MS) {
                             tracker.lastEmittedTime = nowMs
                             onGestureDetected(ButtonGestureEvent(button, PressType.SINGLE_CLICK, nowMs))

@@ -18,36 +18,38 @@ class DesktopActionRouter(
     private val routingEnabled: () -> Boolean = { true },
     private val genericInputDispatcher: GenericInputDispatcher = DesktopGenericInputDispatcher
 ) {
+    private val capabilities = PlatformCapabilities.desktop()
     private val _lastRoutedActionLabel = MutableStateFlow("Ready")
     val lastRoutedActionLabel: StateFlow<String> = _lastRoutedActionLabel.asStateFlow()
 
     fun routeGesture(event: ButtonGestureEvent) {
         if (!routingEnabled()) return
         val config = configSupplier()
-        val target = PresetStore.resolve(config, event.button, event.type) ?: if (config.podAssignment != PodAssignment.LEGACY_SHARED) ButtonMappingStore.assignedAction(config.podAssignment, event.button, event.type) else ButtonMappingStore.resolveAction(
-            mode = config.mode,
-            button = event.button,
-            pressType = event.type,
-            customBindings = config.customBindings,
-            rightPodOnlyNoZwift = config.rightPodOnlyNoZwift,
-            useZForShiftDownInSinglePodMode = config.useZForShiftDownInSinglePodMode
-        )
+        val activePreset = PresetStore.active(config)
+        val target = PresetStore.resolve(config, event.button, event.type) ?: MappedTargetAction.NONE
 
-        _lastRoutedActionLabel.value = PresetStore.active(config)?.let { PresetStore.bindingLabel(it, PresetBindingKey(event.button.canonicalButton, event.type)) } ?: target.label
+        val actionText = activePreset?.let {
+            PresetStore.bindingLabel(it, PresetBindingKey(event.button.canonicalButton, event.type), PlatformKind.DESKTOP)
+        } ?: target.label
+        _lastRoutedActionLabel.value = actionText
 
+        val scopeLabel = activePreset?.name ?: "Default"
         DiagnosticLogger.info(
             LogCategory.ROUTER,
-            "[${config.mode.shortTitle}] ${event.button.displayName} (${event.type.name}) -> ${target.label}"
+            "[$scopeLabel] ${event.button.displayName} (${event.type.name}) -> ${target.label}"
         )
 
         DesktopFeedbackCueManager.triggerCue(target, config)
 
         if (target.isGenericInput) {
             val key = PresetBindingKey(event.button.canonicalButton, event.type)
-            val payload = PresetStore.active(config)?.inputConfigs?.get(key)
+            val payload = activePreset?.inputConfigs?.get(key)
             synchronized(DesktopGenericInputDispatcher.routingLock) {
-                if (!routingEnabled() || payload == null || !payload.validFor(target) || !genericInputDispatcher.dispatch(target, payload)) {
-                    DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input is not configured or unavailable")
+                if (!routingEnabled() || payload == null || !capabilities.isValidInputConfig(target, payload) ||
+                    !genericInputDispatcher.dispatch(target, payload, event.isRepeat, event.button.canonicalButton)
+                ) {
+                    val statusHint = DesktopGenericInputDispatcher.inputStatus
+                    DiagnosticLogger.warn(LogCategory.ROUTER, "Desktop input is not configured or unavailable ($statusHint)")
                 }
             }
         }

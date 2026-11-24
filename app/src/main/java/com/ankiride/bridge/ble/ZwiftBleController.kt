@@ -39,6 +39,7 @@ class ZwiftBleController(
         const val DEVICE_ID_RIGHT_POD: Byte = 0x07
         const val DEVICE_ID_LEFT_POD: Byte = 0x08
         const val DEVICE_ID_CLICK: Byte = 0x09
+        const val DEVICE_ID_RIDE_LEFT: Byte = 0x0B
 
         val RIDE_ON_HANDSHAKE = byteArrayOf(0x52, 0x69, 0x64, 0x65, 0x4F, 0x6E) // "RideOn"
 
@@ -62,7 +63,8 @@ class ZwiftBleController(
     override val gestureEvents: SharedFlow<ButtonGestureEvent> = _gestureEvents
 
     private val gestureEngine = ZwiftGestureEngine(
-        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) }
+        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) },
+        onRepeatReleased = { button -> com.ankiride.bridge.service.AndroidGenericInputDispatcher.cancelPendingRepeats(button.canonicalButton) }
     ) { event ->
         DiagnosticLogger.info(
             LogCategory.BLE,
@@ -89,9 +91,8 @@ class ZwiftBleController(
             }
             if (activeGatts.containsKey(address)) return
 
-            // In 1-Pod Mode, once 1 pod is connected (since Click v2 mirrors both pods over 1 link), ignore second pod
-            if ((currentConfig.podAssignment == PodAssignment.RIGHT_ANKI_ONLY ||
-                    (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED && currentConfig.rightPodOnlyNoZwift)) && activeGatts.isNotEmpty()) {
+            // Single-controller modes connect at most one pod so any second controller stays free.
+            if (currentConfig.podAssignment.isSingleControllerMode && activeGatts.isNotEmpty()) {
                 return
             }
 
@@ -103,6 +104,7 @@ class ZwiftBleController(
                 DEVICE_ID_RIGHT_POD -> "RightPod(0x07)"
                 DEVICE_ID_LEFT_POD -> "LeftPod(0x08)"
                 DEVICE_ID_CLICK -> "Click(0x09)"
+                DEVICE_ID_RIDE_LEFT -> "Click4Way(0x0B)"
                 null -> "ZwiftPod"
                 else -> "Pod(0x%02X)".format(podType)
             }
@@ -115,17 +117,22 @@ class ZwiftBleController(
         }
 
         override fun onScanFailed(errorCode: Int) {
-            DiagnosticLogger.error(LogCategory.BLE, "BLE Scan failed with errorCode=$errorCode")
+            DiagnosticLogger.error(LogCategory.BLE, "Bluetooth scan failed (errorCode=$errorCode) — toggle Bluetooth or restart ClickControl")
             _connectionState.value = BleConnectionState.ERROR
         }
     }
 
     fun updateConfiguration(config: AppConfiguration) {
+        val presetChanged = currentConfig.activePresetId != config.activePresetId ||
+            currentConfig.presets != config.presets
         val ownershipChanged = currentConfig.podAssignment != config.podAssignment ||
-            currentConfig.rightPodOnlyNoZwift != config.rightPodOnlyNoZwift ||
             currentConfig.pinnedRightPodMac != config.pinnedRightPodMac ||
             currentConfig.pinnedLeftPodMac != config.pinnedLeftPodMac
         currentConfig = config
+        if (presetChanged) {
+            gestureEngine.reset()
+            com.ankiride.bridge.service.AndroidGenericInputDispatcher.cancelPendingRepeats(null)
+        }
         if (ownershipChanged && isScanning) {
             disconnect()
             startScanAndConnect(config)
@@ -135,13 +142,13 @@ class ZwiftBleController(
     override fun startScanAndConnect(config: AppConfiguration) {
         currentConfig = config
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            DiagnosticLogger.error(LogCategory.BLE, "Bluetooth adapter is disabled or unavailable")
+            DiagnosticLogger.error(LogCategory.BLE, "Bluetooth is turned off — enable Bluetooth on your phone to connect your controller")
             _connectionState.value = BleConnectionState.ERROR
             return
         }
 
         val scanner = bluetoothAdapter.bluetoothLeScanner ?: run {
-            DiagnosticLogger.error(LogCategory.BLE, "BluetoothLeScanner is null")
+            DiagnosticLogger.error(LogCategory.BLE, "Bluetooth LE scanner unavailable — turn Bluetooth off and back on")
             _connectionState.value = BleConnectionState.ERROR
             return
         }
@@ -156,7 +163,7 @@ class ZwiftBleController(
 
         DiagnosticLogger.info(
             LogCategory.BLE,
-            "Starting BLE scan (1-Pod Default=${config.rightPodOnlyNoZwift})"
+            "Starting BLE scan (mode=${config.podAssignment.name})"
         )
         _connectionState.value = BleConnectionState.SCANNING
         isScanning = true
@@ -199,7 +206,11 @@ class ZwiftBleController(
         val count = connectedPods.size
         val nextState = when {
             count >= 2 -> BleConnectionState.CONNECTED_BOTH_PODS
-            count == 1 -> BleConnectionState.CONNECTED_RIGHT_ONLY
+            count == 1 -> if (connectedPods.values.firstOrNull() == true) {
+                BleConnectionState.CONNECTED_LEFT_ONLY
+            } else {
+                BleConnectionState.CONNECTED_RIGHT_ONLY
+            }
             activeGatts.isEmpty() -> BleConnectionState.DISCONNECTED
             else -> BleConnectionState.CONNECTING
         }
@@ -260,7 +271,7 @@ class ZwiftBleController(
                 else _lastRightMac.value = device.address
                 DiagnosticLogger.info(LogCategory.BLE, "'RideOn' handshake complete on ${device.address}")
                 updateConnectionState()
-                if (isLeftPod && !currentConfig.rightPodOnlyNoZwift && gatt != null) {
+                if (isLeftPod && currentConfig.podAssignment == PodAssignment.BOTH_CONTROLLERS && gatt != null) {
                     scheduleLeftPodWatchdog(device)
                 }
             }
@@ -289,7 +300,7 @@ class ZwiftBleController(
 
         val hex = value.joinToString(" ") { "%02X".format(it) }
         var parsedMask = ZwiftPacketParser.parseActiveButtonMask(value)
-        if (parsedMask != null && currentConfig.podAssignment != PodAssignment.LEGACY_SHARED && value[0] == ZwiftPacketParser.MSG_CLICK_V1_SHIFT) {
+        if (parsedMask != null && currentConfig.podAssignment != PodAssignment.SINGLE_CONTROLLER && value[0] == ZwiftPacketParser.MSG_CLICK_V1_SHIFT) {
             parsedMask = when {
                 isLeftPod && parsedMask == ClickButton.SHIFT_UP_RIGHT.bitmask -> ClickButton.SHIFT_UP_LEFT.bitmask
                 !isLeftPod && parsedMask == ClickButton.SHIFT_DOWN_LEFT.bitmask -> ClickButton.SHIFT_DOWN_RIGHT.bitmask

@@ -12,15 +12,17 @@ class PresetModelTest {
         assertEquals(listOf(one, two) to "two", PresetStore.deserialize(encoded))
         val config = AppConfiguration(presets = listOf(one, two), activePresetId = one.id)
         assertEquals(MappedTargetAction.MW_CAMERA, PresetStore.resolve(config, key.button, key.pressType))
-        assertEquals(MappedTargetAction.MW_CAMERA, PresetStore.resolve(config.copy(podAssignment = PodAssignment.RIGHT_ANKI_ONLY, rightPodOnlyNoZwift = true), key.button, key.pressType))
-        assertEquals(MappedTargetAction.MW_CAMERA, PresetStore.resolve(config.copy(podAssignment = PodAssignment.RIGHT_ANKI_LEFT_BIKE, rightPodOnlyNoZwift = false), key.button, key.pressType))
+        assertEquals(MappedTargetAction.MW_CAMERA, PresetStore.resolve(config.copy(podAssignment = PodAssignment.RIGHT_CONTROLLER_ONLY), key.button, key.pressType))
+        assertEquals(MappedTargetAction.MW_CAMERA, PresetStore.resolve(config.copy(podAssignment = PodAssignment.BOTH_CONTROLLERS), key.button, key.pressType))
         assertEquals(AnkiTarget.ANKICONNECT, PresetStore.active(config.copy(activePresetId = two.id))?.ankiTarget)
         assertEquals(MappedTargetAction.NONE, PresetStore.resolve(config, ClickButton.Y, PressType.SINGLE_CLICK))
     }
+
     @Test fun malformedDataIsRejected() {
         assertNull(PresetStore.deserialize("1|bad\ninvalid"))
         assertNull(PresetStore.deserialize("2|unsupported"))
     }
+
     @Test fun canonicalAliasesSharePhysicalBinding() {
         val preset = MappingPreset("one", "test", AnkiTarget.ANKICONNECT, mapOf(PresetBindingKey(ClickButton.SHIFT_DOWN_LEFT, PressType.SINGLE_CLICK) to MappedTargetAction.ANKI_UNDO))
         val config = AppConfiguration(presets = listOf(preset), activePresetId = preset.id)

@@ -3,12 +3,12 @@ package com.ankiride.bridge.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
-import android.os.Build
-import android.os.SystemClock
-import android.view.KeyEvent
+import android.view.WindowManager
 import com.ankiride.bridge.core.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
@@ -17,23 +17,69 @@ internal data class SwipeSegment(val startX: Float, val startY: Float, val endX:
 internal fun computeSwipeSegment(config: InputConfig, widthPixels: Int, heightPixels: Int): SwipeSegment {
     val maxX = (widthPixels - 1).coerceAtLeast(1).toFloat()
     val maxY = (heightPixels - 1).coerceAtLeast(1).toFloat()
-    val centerXNorm = if (config.width > 0f) (config.left + config.width / 2f).coerceIn(0.1f, 0.9f) else 0.5f
-    val centerYNorm = if (config.height > 0f) (config.top + config.height / 2f).coerceIn(0.1f, 0.9f) else 0.5f
-    val spanNorm = (config.scrollAmount * 0.08f).coerceIn(0.15f, 0.70f)
-    val halfSpan = spanNorm / 2f
-    // Scrolling down a page means swiping upward on touchscreens (and vice versa).
+    val hasArea = config.width > 0f && config.height > 0f
+    val minXNorm = if (hasArea) (config.left + config.width * 0.05f).coerceIn(0.01f, 0.99f) else 0.05f
+    val maxXNorm = if (hasArea) (config.left + config.width * 0.95f).coerceIn(minXNorm, 0.99f) else 0.95f
+    val minYNorm = if (hasArea) (config.top + config.height * 0.05f).coerceIn(0.01f, 0.99f) else 0.05f
+    val maxYNorm = if (hasArea) (config.top + config.height * 0.95f).coerceIn(minYNorm, 0.99f) else 0.95f
+    val centerXNorm = (minXNorm + maxXNorm) / 2f
+    val centerYNorm = (minYNorm + maxYNorm) / 2f
+    val requestedHalfSpan = (config.scrollAmount * 0.08f).coerceIn(0.15f, 0.70f) / 2f
+    val halfX = minOf(requestedHalfSpan, (maxXNorm - minXNorm) / 2f)
+    val halfY = minOf(requestedHalfSpan, (maxYNorm - minYNorm) / 2f)
+    // Scrolling down or advancing right means swiping upward or leftward on a touchscreen.
     return when (config.scrollDirection) {
-        ScrollDirection.DOWN -> SwipeSegment(centerXNorm * maxX, (centerYNorm + halfSpan).coerceAtMost(0.95f) * maxY, centerXNorm * maxX, (centerYNorm - halfSpan).coerceAtLeast(0.05f) * maxY)
-        ScrollDirection.UP -> SwipeSegment(centerXNorm * maxX, (centerYNorm - halfSpan).coerceAtLeast(0.05f) * maxY, centerXNorm * maxX, (centerYNorm + halfSpan).coerceAtMost(0.95f) * maxY)
-        ScrollDirection.RIGHT -> SwipeSegment((centerXNorm + halfSpan).coerceAtMost(0.95f) * maxX, centerYNorm * maxY, (centerXNorm - halfSpan).coerceAtLeast(0.05f) * maxX, centerYNorm * maxY)
-        ScrollDirection.LEFT -> SwipeSegment((centerXNorm - halfSpan).coerceAtLeast(0.05f) * maxX, centerYNorm * maxY, (centerXNorm + halfSpan).coerceAtMost(0.95f) * maxX, centerYNorm * maxY)
+        ScrollDirection.DOWN -> SwipeSegment(centerXNorm * maxX, (centerYNorm + halfY) * maxY, centerXNorm * maxX, (centerYNorm - halfY) * maxY)
+        ScrollDirection.UP -> SwipeSegment(centerXNorm * maxX, (centerYNorm - halfY) * maxY, centerXNorm * maxX, (centerYNorm + halfY) * maxY)
+        ScrollDirection.RIGHT -> SwipeSegment((centerXNorm + halfX) * maxX, centerYNorm * maxY, (centerXNorm - halfX) * maxX, centerYNorm * maxY)
+        ScrollDirection.LEFT -> SwipeSegment((centerXNorm - halfX) * maxX, centerYNorm * maxY, (centerXNorm + halfX) * maxX, centerYNorm * maxY)
     }
 }
 
+private data class QueuedTouchAction(
+    val generation: Long,
+    val allRepeatsGeneration: Long,
+    val buttonRepeatGeneration: Long,
+    val sourceButton: ClickButton?,
+    val action: MappedTargetAction,
+    val config: InputConfig,
+    val isRepeat: Boolean
+)
+
 object AndroidGenericInputDispatcher : GenericInputDispatcher {
     val routingLock = Any()
+    private val capabilities = PlatformCapabilities.android()
     private val generation = AtomicLong()
-    fun cancelPending() { generation.incrementAndGet() }
+    private val allRepeatsGeneration = AtomicLong()
+    private val buttonRepeatGenerations = ConcurrentHashMap<ClickButton, AtomicLong>()
+    private val inFlight = AtomicBoolean(false)
+
+    private fun counterFor(button: ClickButton?): AtomicLong? =
+        button?.canonicalButton?.let { buttonRepeatGenerations.computeIfAbsent(it) { AtomicLong() } }
+
+    private fun isItemValid(item: QueuedTouchAction): Boolean {
+        if (item.generation != generation.get()) return false
+        if (!item.isRepeat) return true
+        if (item.allRepeatsGeneration != allRepeatsGeneration.get()) return false
+        val btnCounter = item.sourceButton?.let { buttonRepeatGenerations[it] } ?: return true
+        return item.buttonRepeatGeneration == btnCounter.get()
+    }
+
+    fun cancelPendingRepeats(button: ClickButton? = null) {
+        if (button == null) {
+            allRepeatsGeneration.incrementAndGet()
+        } else {
+            counterFor(button)?.incrementAndGet()
+        }
+    }
+
+    fun cancelAllPending() {
+        generation.incrementAndGet()
+        allRepeatsGeneration.incrementAndGet()
+    }
+
+    fun cancelPending() = cancelAllPending()
+
     private suspend fun dispatchGestureStroke(service: AccessibilityService, path: Path, durationMs: Long): Boolean {
         val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, durationMs)).build()
         return withTimeoutOrNull(3000) {
@@ -46,63 +92,83 @@ object AndroidGenericInputDispatcher : GenericInputDispatcher {
             }
         } ?: false
     }
+
     private val queue by lazy {
-        val queue = Channel<Triple<Long, MappedTargetAction, InputConfig>>(64)
+        val queue = Channel<QueuedTouchAction>(64)
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
-            for ((queuedGeneration, action, config) in queue) {
-                if (queuedGeneration != generation.get()) continue
+            for (item in queue) {
+                if (!isItemValid(item)) continue
+                if (item.isRepeat && inFlight.get()) continue
                 val service = BridgeAccessibilityService.activeInstance
-                if (service == null) { DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input requires the accessibility service"); continue }
+                if (service == null) {
+                    DiagnosticLogger.warn(LogCategory.ROUTER, "Touch action requires the Android accessibility service")
+                    continue
+                }
+                inFlight.set(true)
                 try {
-                    if (action == MappedTargetAction.SCREEN_CLICK || action == MappedTargetAction.SCREEN_SCROLL) {
-                        val metrics = android.util.DisplayMetrics()
-                        @Suppress("DEPRECATION")
-                        (service.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.getRealMetrics(metrics)
-                        val completed = if (action == MappedTargetAction.SCREEN_CLICK) {
-                            val x = (config.left + config.width / 2) * (metrics.widthPixels - 1)
-                            val y = (config.top + config.height / 2) * (metrics.heightPixels - 1)
-                            val path = Path().apply { moveTo(x, y) }
-                            dispatchGestureStroke(service, path, 75)
-                        } else {
-                            val seg = computeSwipeSegment(config, metrics.widthPixels, metrics.heightPixels)
-                            val path = Path().apply { moveTo(seg.startX, seg.startY); lineTo(seg.endX, seg.endY) }
-                            dispatchGestureStroke(service, path, 220)
-                        }
-                        if (!completed) DiagnosticLogger.warn(LogCategory.ROUTER, "${action.label} failed or was cancelled")
-                    } else if (Build.VERSION.SDK_INT >= 33) {
-                        val input = service.inputMethod
-                        val connection = input?.currentInputConnection
-                        if (input?.currentInputStarted != true || connection == null) { DiagnosticLogger.warn(LogCategory.ROUTER, "Keyboard input requires a focused text editor"); continue }
-                        val name = when (config.key!!) {
-                            PortableKey.BACKSPACE -> "DEL"
-                            PortableKey.DELETE -> "FORWARD_DEL"
-                            PortableKey.HOME -> "MOVE_HOME"
-                            PortableKey.END -> "MOVE_END"
-                            PortableKey.UP, PortableKey.DOWN, PortableKey.LEFT, PortableKey.RIGHT -> "DPAD_${config.key.name}"
-                            else -> config.key.name.removePrefix("DIGIT_")
-                        }
-                        val code = KeyEvent.keyCodeFromString("KEYCODE_$name")
-                        if (code == KeyEvent.KEYCODE_UNKNOWN) { DiagnosticLogger.warn(LogCategory.ROUTER, "Unsupported key"); continue }
-                        val meta = (if (config.ctrl) KeyEvent.META_CTRL_ON else 0) or (if (config.alt) KeyEvent.META_ALT_ON else 0) or (if (config.shift) KeyEvent.META_SHIFT_ON else 0) or (if (config.meta) KeyEvent.META_META_ON else 0)
-                        val now = SystemClock.uptimeMillis()
-                        try { connection.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, meta, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_SOFT_KEYBOARD)) } finally {
-                            connection.sendKeyEvent(KeyEvent(now, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, meta, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_SOFT_KEYBOARD))
-                        }
-                    } else DiagnosticLogger.warn(LogCategory.ROUTER, "Keyboard input requires Android 13 or later and a focused text editor")
-                } catch (e: Exception) { DiagnosticLogger.error(LogCategory.ROUTER, "Generic input failed: ${e.message}") }
+                    val metrics = android.util.DisplayMetrics()
+                    @Suppress("DEPRECATION")
+                    (service.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
+                    if (!isItemValid(item)) continue
+                    val completed = if (item.action == MappedTargetAction.SCREEN_CLICK) {
+                        val x = (item.config.left + item.config.width / 2) * (metrics.widthPixels - 1)
+                        val y = (item.config.top + item.config.height / 2) * (metrics.heightPixels - 1)
+                        val path = Path().apply { moveTo(x, y) }
+                        dispatchGestureStroke(service, path, 75)
+                    } else {
+                        val seg = computeSwipeSegment(item.config, metrics.widthPixels, metrics.heightPixels)
+                        val path = Path().apply { moveTo(seg.startX, seg.startY); lineTo(seg.endX, seg.endY) }
+                        dispatchGestureStroke(service, path, 220)
+                    }
+                    if (!completed) DiagnosticLogger.warn(LogCategory.ROUTER, "${item.action.displayLabel(PlatformKind.ANDROID)} failed or was cancelled")
+                } catch (e: Exception) {
+                    DiagnosticLogger.error(LogCategory.ROUTER, "Touch action failed: ${e.message}")
+                } finally {
+                    inFlight.set(false)
+                }
             }
         }
         queue
     }
-    override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean {
-        if (!config.validFor(action) || (action == MappedTargetAction.SCREEN_CLICK && config.clickAtPointer)) return false
-        val service = BridgeAccessibilityService.activeInstance
-        if (service == null) { DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input requires the accessibility service"); return false }
-        if (action == MappedTargetAction.KEYBOARD_INPUT && (Build.VERSION.SDK_INT < 33 || service.inputMethod?.currentInputStarted != true || service.inputMethod?.currentInputConnection == null)) {
-            DiagnosticLogger.warn(LogCategory.ROUTER, "Keyboard input requires Android 13 or later and a focused text editor"); return false
+
+    override fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean =
+        dispatch(action, config, isRepeat = false, sourceButton = null)
+
+    override fun dispatch(action: MappedTargetAction, config: InputConfig, isRepeat: Boolean): Boolean =
+        dispatch(action, config, isRepeat = isRepeat, sourceButton = null)
+
+    override fun dispatch(
+        action: MappedTargetAction,
+        config: InputConfig,
+        isRepeat: Boolean,
+        sourceButton: ClickButton?
+    ): Boolean {
+        if (!capabilities.isValidInputConfig(action, config)) {
+            if (action == MappedTargetAction.KEYBOARD_INPUT) {
+                DiagnosticLogger.warn(LogCategory.ROUTER, "Keyboard shortcuts are not supported on Android")
+            }
+            return false
         }
-        val accepted = queue.trySend(Triple(generation.get(), action, config)).isSuccess
-        if (!accepted) DiagnosticLogger.warn(LogCategory.ROUTER, "Generic input queue is full")
+        val service = BridgeAccessibilityService.activeInstance
+        if (service == null) {
+            DiagnosticLogger.warn(LogCategory.ROUTER, "Touch action requires the Android accessibility service")
+            return false
+        }
+        if (isRepeat && inFlight.get()) return true
+        val canonical = sourceButton?.canonicalButton
+        val btnGen = counterFor(canonical)?.get() ?: 0L
+        val accepted = queue.trySend(
+            QueuedTouchAction(
+                generation = generation.get(),
+                allRepeatsGeneration = allRepeatsGeneration.get(),
+                buttonRepeatGeneration = btnGen,
+                sourceButton = canonical,
+                action = action,
+                config = config,
+                isRepeat = isRepeat
+            )
+        ).isSuccess
+        if (!accepted) DiagnosticLogger.warn(LogCategory.ROUTER, "Touch input queue is full")
         return accepted
     }
 }

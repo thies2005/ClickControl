@@ -32,7 +32,14 @@ class BridgeAccessibilityService : AccessibilityService() {
         activeInstance = this
         _isConnectedFlow.value = true
         val cfg = ButtonMappingStore.loadFullConfiguration(this)
-        FloatingHudPill.syncVisibility(this, cfg.floatingHudPillEnabled, BridgeForegroundService.connectionStateFlow.value, cfg.mode)
+        val activePreset = com.ankiride.bridge.core.PresetStore.active(cfg)
+        FloatingHudPill.syncVisibility(
+            service = this,
+            enabled = cfg.floatingHudPillEnabled,
+            bleState = BridgeForegroundService.connectionStateFlow.value,
+            presetName = activePreset?.name ?: "Default",
+            ankiTarget = activePreset?.ankiTarget ?: com.ankiride.bridge.core.AnkiTarget.ANKIDROID
+        )
         DiagnosticLogger.info(LogCategory.PERMS, "BridgeAccessibilityService connected and active")
     }
 

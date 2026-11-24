@@ -12,39 +12,44 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import com.ankiride.bridge.core.DiagnosticLogger
 import com.ankiride.bridge.core.LogCategory
-import com.ankiride.bridge.core.OperatingMode
 
 object MyShiftOverlayCalibrator {
     private const val PREFS_CALIBRATION = "myshift_calibration_profiles"
     private var overlayView: View? = null
     private var windowManager: WindowManager? = null
 
-    fun profilePrefix(context: Context, mode: OperatingMode): String {
+    fun profilePrefix(context: Context): String {
         val dm = context.resources.displayMetrics
         val orientation = if (dm.widthPixels >= dm.heightPixels) "land" else "port"
-        return "calib_${mode.name}_${orientation}_${dm.widthPixels}x${dm.heightPixels}"
+        return "calib_${orientation}_${dm.widthPixels}x${dm.heightPixels}"
     }
 
-    fun loadCalibratedCoordinates(context: Context, mode: OperatingMode): FloatArray {
+    private fun legacyPrefix(context: Context): String {
+        val dm = context.resources.displayMetrics
+        val orientation = if (dm.widthPixels >= dm.heightPixels) "land" else "port"
+        return "calib_MODE_1_TABLET_SPLIT_SCREEN_${orientation}_${dm.widthPixels}x${dm.heightPixels}"
+    }
+
+    fun loadCalibratedCoordinates(context: Context): FloatArray {
         val prefs = context.getSharedPreferences(PREFS_CALIBRATION, Context.MODE_PRIVATE)
-        val prefix = profilePrefix(context, mode)
-        val upX = prefs.getFloat("${prefix}_up_x", 0.92f)
-        val upY = prefs.getFloat("${prefix}_up_y", 0.85f)
-        val downX = prefs.getFloat("${prefix}_down_x", 0.84f)
-        val downY = prefs.getFloat("${prefix}_down_y", 0.85f)
+        val prefix = profilePrefix(context)
+        val legacy = legacyPrefix(context)
+        val upX = if (prefs.contains("${prefix}_up_x")) prefs.getFloat("${prefix}_up_x", 0.92f) else prefs.getFloat("${legacy}_up_x", 0.92f)
+        val upY = if (prefs.contains("${prefix}_up_y")) prefs.getFloat("${prefix}_up_y", 0.85f) else prefs.getFloat("${legacy}_up_y", 0.85f)
+        val downX = if (prefs.contains("${prefix}_down_x")) prefs.getFloat("${prefix}_down_x", 0.84f) else prefs.getFloat("${legacy}_down_x", 0.84f)
+        val downY = if (prefs.contains("${prefix}_down_y")) prefs.getFloat("${prefix}_down_y", 0.85f) else prefs.getFloat("${legacy}_down_y", 0.85f)
         return floatArrayOf(upX, upY, downX, downY)
     }
 
     fun saveCalibratedCoordinates(
         context: Context,
-        mode: OperatingMode,
         upX: Float,
         upY: Float,
         downX: Float,
         downY: Float
     ) {
         val prefs = context.getSharedPreferences(PREFS_CALIBRATION, Context.MODE_PRIVATE)
-        val prefix = profilePrefix(context, mode)
+        val prefix = profilePrefix(context)
         prefs.edit()
             .putFloat("${prefix}_up_x", upX)
             .putFloat("${prefix}_up_y", upY)
@@ -53,8 +58,8 @@ object MyShiftOverlayCalibrator {
             .apply()
     }
 
-    fun showCalibrationOverlay(service: AccessibilityService, mode: OperatingMode) {
-        val coords = loadCalibratedCoordinates(service, mode)
+    fun showCalibrationOverlay(service: AccessibilityService) {
+        val coords = loadCalibratedCoordinates(service)
         showOverlay(
             service = service,
             initialUpX = coords[0],
@@ -62,7 +67,7 @@ object MyShiftOverlayCalibrator {
             initialDownX = coords[2],
             initialDownY = coords[3],
             onCoordinatesChanged = { upX, upY, downX, downY ->
-                saveCalibratedCoordinates(service, mode, upX, upY, downX, downY)
+                saveCalibratedCoordinates(service, upX, upY, downX, downY)
             }
         )
     }

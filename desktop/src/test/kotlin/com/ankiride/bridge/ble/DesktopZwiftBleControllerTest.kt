@@ -57,6 +57,11 @@ class DesktopZwiftBleControllerTest {
     fun setUp() {
         testScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         controller = DesktopZwiftBleController(scope = testScope)
+        controller.updateConfiguration(
+            com.ankiride.bridge.core.AppConfiguration(
+                podAssignment = com.ankiride.bridge.core.PodAssignment.BOTH_CONTROLLERS
+            )
+        )
         val parse = controller.javaClass.getDeclaredMethod("parseWorkerLine", String::class.java).apply { isAccessible = true }
         parse.invoke(controller, "STATE CONNECTED_RIGHT AA:BB:CC:DD:EE:01")
         parse.invoke(controller, "STATE CONNECTED_LEFT AA:BB:CC:DD:EE:02")
@@ -226,8 +231,8 @@ class DesktopZwiftBleControllerTest {
         parse("STATE SCANNING")
         assertEquals(BleConnectionState.SCANNING, controller.connectionState.value)
 
-        parse("STATE DISCOVERED F4:C4:59:0C:6F:29")
-        assertTrue(controller.discoveredAddresses.value.contains("F4:C4:59:0C:6F:29"))
+        parse("STATE DISCOVERED 02:00:00:00:00:01")
+        assertTrue(controller.discoveredAddresses.value.contains("02:00:00:00:00:01"))
 
         parse("STATE CONNECTING")
         assertEquals(BleConnectionState.CONNECTING, controller.connectionState.value)
@@ -258,8 +263,9 @@ class DesktopZwiftBleControllerTest {
         assertEquals(BleConnectionState.DISCONNECTED, controller.connectionState.value)
 
         // ERROR line
-        parse("STATE ERROR bleak_not_installed")
+        parse("STATE ERROR Bluetooth adapter is off")
         assertEquals(BleConnectionState.ERROR, controller.connectionState.value)
+        assertEquals("Bluetooth adapter is off", controller.lastWorkerError.value)
     }
 
     @Test
@@ -281,7 +287,7 @@ class DesktopZwiftBleControllerTest {
     @Test
     fun testIsValidMacOrUuid() {
         // Valid MAC addresses
-        assertTrue(DesktopZwiftBleController.isValidMacOrUuid("F4:C4:59:0C:6F:29"))
+        assertTrue(DesktopZwiftBleController.isValidMacOrUuid("02:00:00:00:00:01"))
         assertTrue(DesktopZwiftBleController.isValidMacOrUuid("AA-BB-CC-DD-EE-FF"))
         assertTrue(DesktopZwiftBleController.isValidMacOrUuid("01:23:45:67:89:ab"))
 
@@ -292,7 +298,7 @@ class DesktopZwiftBleControllerTest {
         // Invalid / shell injection / argument injection
         assertFalse(DesktopZwiftBleController.isValidMacOrUuid("--help"))
         assertFalse(DesktopZwiftBleController.isValidMacOrUuid("; rm -rf /"))
-        assertFalse(DesktopZwiftBleController.isValidMacOrUuid("F4:C4:59:0C:6F:29 --evil"))
+        assertFalse(DesktopZwiftBleController.isValidMacOrUuid("02:00:00:00:00:01 --evil"))
         assertFalse(DesktopZwiftBleController.isValidMacOrUuid("`reboot`"))
         assertFalse(DesktopZwiftBleController.isValidMacOrUuid("$(whoami)"))
         assertFalse(DesktopZwiftBleController.isValidMacOrUuid(""))
@@ -388,7 +394,8 @@ class DesktopZwiftBleControllerTest {
         fun worker(body: String) = File.createTempFile("ble-probe", ".sh").apply {
             writeText("#!/bin/sh\n$body\n"); setExecutable(true); deleteOnExit()
         }
-        assertTrue(controller.supportsSideProtocol(worker("echo CLICKCONTROL_BLE_PROTOCOL_3")))
+        assertTrue(controller.supportsSideProtocol(worker("echo CLICKCONTROL_BLE_PROTOCOL_4")))
+        assertFalse(controller.supportsSideProtocol(worker("echo CLICKCONTROL_BLE_PROTOCOL_3")))
         assertFalse(controller.supportsSideProtocol(worker("echo old-worker")))
         assertFalse(controller.supportsSideProtocol(worker("exec sleep 10")))
     }
@@ -403,8 +410,8 @@ class DesktopZwiftBleControllerTest {
         assertEquals(ClickButton.SHIFT_DOWN_RIGHT.bitmask, controller.podActiveMasks[right])
     }
     @Test
-    fun legacySharedPreservesOppositeSideBitsFromOneLink() {
-        controller.updateConfiguration(com.ankiride.bridge.core.AppConfiguration(podAssignment = com.ankiride.bridge.core.PodAssignment.LEGACY_SHARED))
+    fun singleControllerPreservesOppositeSideBitsFromOneLink() {
+        controller.updateConfiguration(com.ankiride.bridge.core.AppConfiguration(podAssignment = com.ankiride.bridge.core.PodAssignment.SINGLE_CONTROLLER))
         val right = "AA:BB:CC:DD:EE:01"
         controller.handleRawNotification(right, buildPacket(ClickButton.SHIFT_DOWN_LEFT.bitmask.inv()))
         assertEquals(ClickButton.SHIFT_DOWN_LEFT.bitmask, controller.podActiveMasks[right])

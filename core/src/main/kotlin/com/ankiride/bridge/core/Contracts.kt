@@ -3,30 +3,30 @@ package com.ankiride.bridge.core
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
-enum class OperatingMode(val shortTitle: String, val subtitle: String) {
-    MODE_1_TABLET_SPLIT_SCREEN(
-        "Split-Screen",
-        "MyWhoosh + AnkiDroid side-by-side on Tablet (Local Touch + 127.0.0.1)"
-    ),
-    MODE_2_TABLET_ANKI_PHONE_MYWHOOSH(
-        "Tablet + Phone",
-        "AnkiDroid on Tablet + MyWhoosh on Phone over Wi-Fi mDNS"
-    ),
-    MODE_3_ANKI_ONLY(
-        "Anki-Only",
-        "Full-screen AnkiDroid study mode (all buttons mapped to Anki)"
-    ),
-    MODE_4_MYWHOOSH_ONLY(
-        "MyWhoosh-Only",
-        "Full-screen MyWhoosh ride mode (all buttons mapped to MyWhoosh)"
-    ),
-    MODE_5_UBUNTU_ANKICONNECT(
-        "Ubuntu Anki + Ride",
-        "Desktop Anki on Ubuntu Laptop (AnkiConnect :8765) + MyWhoosh on Tablet/Phone"
-    )
+enum class PlatformKind { DESKTOP, ANDROID }
+
+enum class MyWhooshLocation(val displayName: String) {
+    ON_THIS_DEVICE("On this device"),
+    ON_ANOTHER_DEVICE("On another device")
 }
 
-enum class PodAssignment { LEGACY_SHARED, RIGHT_ANKI_LEFT_BIKE, RIGHT_ANKI_ONLY }
+enum class PodAssignment {
+    SINGLE_CONTROLLER,
+    RIGHT_CONTROLLER_ONLY,
+    BOTH_CONTROLLERS;
+
+    val isSingleControllerMode: Boolean
+        get() = this == SINGLE_CONTROLLER || this == RIGHT_CONTROLLER_ONLY
+
+    companion object {
+        fun fromStoredName(raw: String?): PodAssignment? = when (raw?.trim()) {
+            "SINGLE_CONTROLLER", "LEGACY_SHARED" -> SINGLE_CONTROLLER
+            "RIGHT_CONTROLLER_ONLY", "RIGHT_ANKI_ONLY" -> RIGHT_CONTROLLER_ONLY
+            "BOTH_CONTROLLERS", "RIGHT_ANKI_LEFT_BIKE" -> BOTH_CONTROLLERS
+            else -> null
+        }
+    }
+}
 
 enum class BleConnectionState {
     DISCONNECTED,
@@ -34,6 +34,7 @@ enum class BleConnectionState {
     CONNECTING,
     HANDSHAKING,
     CONNECTED_RIGHT_ONLY,
+    CONNECTED_LEFT_ONLY,
     CONNECTED_BOTH_PODS,
     ERROR
 }
@@ -89,7 +90,8 @@ enum class PressType(val displayName: String) {
 data class ButtonGestureEvent(
     val button: ClickButton,
     val type: PressType,
-    val timestampMs: Long = System.currentTimeMillis()
+    val timestampMs: Long = System.currentTimeMillis(),
+    val isRepeat: Boolean = false
 )
 
 enum class AnkiAction(val displayName: String) {
@@ -148,22 +150,35 @@ enum class MappedTargetAction(
 
     val isGenericInput: Boolean
         get() = this == SCREEN_CLICK || this == KEYBOARD_INPUT || this == SCREEN_SCROLL
+
+    fun displayLabel(platform: PlatformKind): String = when (platform) {
+        PlatformKind.ANDROID -> when (this) {
+            SCREEN_CLICK -> "Screen tap"
+            SCREEN_SCROLL -> "Touch swipe / scroll"
+            KEYBOARD_INPUT -> "Keyboard shortcut (unavailable on Android)"
+            else -> label
+        }
+        PlatformKind.DESKTOP -> when (this) {
+            SCREEN_CLICK -> "Screen click"
+            SCREEN_SCROLL -> "Mouse wheel scroll"
+            KEYBOARD_INPUT -> "Keyboard shortcut"
+            else -> label
+        }
+    }
 }
 
-/**
- * Per-Mode binding key so each OperatingMode has its own independent button customization.
- */
-data class ModeButtonBindingKey(
-    val mode: OperatingMode,
-    val button: ClickButton,
-    val pressType: PressType
-)
-
-enum class AnkiTarget { ANKIDROID, ANKICONNECT }
+enum class AnkiTarget { ANKIDROID, ANKICONNECT, ANKIWEB }
 
 data class PresetBindingKey(val button: ClickButton, val pressType: PressType)
 enum class ScrollDirection { UP, DOWN, LEFT, RIGHT }
-enum class PortableKey { A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4, DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8, DIGIT_9, SPACE, ENTER, TAB, ESCAPE, UP, DOWN, LEFT, RIGHT, BACKSPACE, DELETE, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, PAGE_UP, PAGE_DOWN, HOME, END }
+enum class PortableKey {
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4, DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8, DIGIT_9,
+    SPACE, ENTER, TAB, ESCAPE, UP, DOWN, LEFT, RIGHT, BACKSPACE, DELETE,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    PAGE_UP, PAGE_DOWN, HOME, END
+}
+
 data class InputConfig(
     val left: Float = 0f, val top: Float = 0f, val width: Float = 0f, val height: Float = 0f,
     val key: PortableKey? = null, val ctrl: Boolean = false, val alt: Boolean = false,
@@ -184,17 +199,132 @@ data class InputConfig(
         MappedTargetAction.SCREEN_SCROLL -> scrollAmount in 1..20 && (clickAtPointer || hasValidArea())
         else -> false
     }
-    fun label(action: MappedTargetAction): String {
+
+    fun label(action: MappedTargetAction, platform: PlatformKind = PlatformKind.DESKTOP): String {
         val base = when (action) {
-            MappedTargetAction.SCREEN_CLICK -> (if (clickAtPointer) "Click at pointer" else "Screen click (${(left * 100).toInt()}%, ${(top * 100).toInt()}%, ${(width * 100).toInt()}% × ${(height * 100).toInt()}%)")
-            MappedTargetAction.KEYBOARD_INPUT -> listOfNotNull("Ctrl".takeIf { ctrl }, "Alt".takeIf { alt }, "Shift".takeIf { shift }, "Meta".takeIf { meta }, key?.name?.removePrefix("DIGIT_")).joinToString(" + ")
-            MappedTargetAction.SCREEN_SCROLL -> "Scroll ${scrollDirection.name.lowercase()} ($scrollAmount)"
+            MappedTargetAction.SCREEN_CLICK -> when {
+                platform == PlatformKind.ANDROID && clickAtPointer -> "Screen tap (area required)"
+                platform == PlatformKind.ANDROID -> "Screen tap (${(left * 100).toInt()}%, ${(top * 100).toInt()}%, ${(width * 100).toInt()}% × ${(height * 100).toInt()}%)"
+                clickAtPointer -> "Click at pointer"
+                else -> "Screen click (${(left * 100).toInt()}%, ${(top * 100).toInt()}%, ${(width * 100).toInt()}% × ${(height * 100).toInt()}%)"
+            }
+            MappedTargetAction.KEYBOARD_INPUT -> if (platform == PlatformKind.ANDROID) {
+                "Not available on Android"
+            } else {
+                listOfNotNull(
+                    "Ctrl".takeIf { ctrl },
+                    "Alt".takeIf { alt },
+                    "Shift".takeIf { shift },
+                    "Meta".takeIf { meta },
+                    key?.name?.removePrefix("DIGIT_")
+                ).joinToString(" + ")
+            }
+            MappedTargetAction.SCREEN_SCROLL -> if (platform == PlatformKind.ANDROID) {
+                when (scrollDirection) {
+                    ScrollDirection.RIGHT -> "Swipe: Next slide / page ($scrollAmount)"
+                    ScrollDirection.LEFT -> "Swipe: Previous slide / page ($scrollAmount)"
+                    ScrollDirection.DOWN -> "Swipe: Scroll down ($scrollAmount)"
+                    ScrollDirection.UP -> "Swipe: Scroll up ($scrollAmount)"
+                }
+            } else {
+                "Scroll ${scrollDirection.name.lowercase()} ($scrollAmount)"
+            }
             else -> action.label
         }
-        return if (action.isGenericInput && repeatWhileHeld) "$base (repeat)" else base
+        return if (action.isGenericInput && repeatWhileHeld && !(platform == PlatformKind.ANDROID && action == MappedTargetAction.KEYBOARD_INPUT)) {
+            "$base (repeat)"
+        } else {
+            base
+        }
     }
 }
-interface GenericInputDispatcher { fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean }
+
+/**
+ * Authoritative capability matrix separating Desktop and Android features so
+ * neither UI nor dispatcher exposes unsupported modes, targets, or input types.
+ */
+data class PlatformCapabilities(
+    val platform: PlatformKind,
+    val supportedAnkiTargets: Set<AnkiTarget>,
+    val supportedGenericActions: Set<MappedTargetAction>,
+    val supportsPointerTargeting: Boolean,
+    val supportsHaptics: Boolean,
+    val supportsTouchCalibration: Boolean,
+    val supportsLinuxAutostart: Boolean
+) {
+    val defaultAnkiTarget: AnkiTarget
+        get() = when (platform) {
+            PlatformKind.DESKTOP -> AnkiTarget.ANKICONNECT
+            PlatformKind.ANDROID -> AnkiTarget.ANKIDROID
+        }
+
+    fun supportsAction(action: MappedTargetAction): Boolean =
+        !action.isGenericInput || action in supportedGenericActions
+
+    fun availableActions(): List<MappedTargetAction> =
+        MappedTargetAction.entries.filter { supportsAction(it) }
+
+    fun availableActions(ankiTarget: AnkiTarget): List<MappedTargetAction> =
+        availableActions().filterNot { ankiTarget == AnkiTarget.ANKIWEB && it == MappedTargetAction.ANKI_UNDO }
+
+    fun supportsAnkiTarget(target: AnkiTarget): Boolean = target in supportedAnkiTargets
+
+    fun normalizeAnkiTarget(target: AnkiTarget): AnkiTarget =
+        if (target in supportedAnkiTargets) target else defaultAnkiTarget
+
+    fun isValidInputConfig(action: MappedTargetAction, config: InputConfig): Boolean {
+        if (!supportsAction(action) || !config.validFor(action)) return false
+        if (!supportsPointerTargeting && config.clickAtPointer &&
+            (action == MappedTargetAction.SCREEN_CLICK || action == MappedTargetAction.SCREEN_SCROLL)
+        ) {
+            return false
+        }
+        return true
+    }
+
+    companion object {
+        fun desktop(
+            isLinux: Boolean = System.getProperty("os.name", "").lowercase().contains("linux")
+        ): PlatformCapabilities = PlatformCapabilities(
+            platform = PlatformKind.DESKTOP,
+            supportedAnkiTargets = setOf(AnkiTarget.ANKICONNECT, AnkiTarget.ANKIWEB),
+            supportedGenericActions = setOf(
+                MappedTargetAction.KEYBOARD_INPUT,
+                MappedTargetAction.SCREEN_SCROLL,
+                MappedTargetAction.SCREEN_CLICK
+            ),
+            supportsPointerTargeting = true,
+            supportsHaptics = false,
+            supportsTouchCalibration = false,
+            supportsLinuxAutostart = isLinux
+        )
+
+        fun android(): PlatformCapabilities = PlatformCapabilities(
+            platform = PlatformKind.ANDROID,
+            supportedAnkiTargets = setOf(AnkiTarget.ANKIDROID, AnkiTarget.ANKIWEB, AnkiTarget.ANKICONNECT),
+            supportedGenericActions = setOf(
+                MappedTargetAction.SCREEN_SCROLL,
+                MappedTargetAction.SCREEN_CLICK
+            ),
+            supportsPointerTargeting = false,
+            supportsHaptics = true,
+            supportsTouchCalibration = true,
+            supportsLinuxAutostart = false
+        )
+    }
+}
+
+interface GenericInputDispatcher {
+    fun dispatch(action: MappedTargetAction, config: InputConfig): Boolean
+    fun dispatch(action: MappedTargetAction, config: InputConfig, isRepeat: Boolean): Boolean =
+        dispatch(action, config)
+    fun dispatch(
+        action: MappedTargetAction,
+        config: InputConfig,
+        isRepeat: Boolean,
+        sourceButton: ClickButton?
+    ): Boolean = dispatch(action, config, isRepeat)
+}
 
 data class MappingPreset(
     val id: String,
@@ -207,29 +337,24 @@ data class MappingPreset(
 data class AppConfiguration(
     val presets: List<MappingPreset> = emptyList(),
     val activePresetId: String? = null,
-    val mode: OperatingMode = OperatingMode.MODE_1_TABLET_SPLIT_SCREEN,
-    val podAssignment: PodAssignment = PodAssignment.RIGHT_ANKI_ONLY,
-    val rightPodOnlyNoZwift: Boolean = true,
-    val useZForShiftDownInSinglePodMode: Boolean = true,
+    val defaultPresetId: String? = null,
+    val myWhooshLocation: MyWhooshLocation = MyWhooshLocation.ON_THIS_DEVICE,
+    val podAssignment: PodAssignment = PodAssignment.SINGLE_CONTROLLER,
     val autoStartOnControllerWake: Boolean = true,
-    // Feature 1: Optional Floating Mini HUD Pill ( strictly OFF by default )
+    val startMinimizedToTray: Boolean = false,
+    // Optional Floating Mini HUD Pill (strictly OFF by default)
     val floatingHudPillEnabled: Boolean = false,
-    // Feature 2: Optional Haptic & Audio Cues ( strictly OFF by default )
+    // Optional Haptic & Audio Cues (strictly OFF by default)
     val hapticFeedbackEnabled: Boolean = false,
     val audioFeedbackEnabled: Boolean = false,
-    // Feature 4: Ubuntu Desktop AnkiConnect target (RFC1918 LAN IP & port 8765)
-    val ubuntuAnkiConnectHost: String = "192.168.1.100",
+    // Desktop / LAN AnkiConnect target
+    val ubuntuAnkiConnectHost: String = "127.0.0.1",
     val ubuntuAnkiConnectPort: Int = 8765,
     val leftPodAutoReconnectSec: Int = 55,
     val openBikeServerPort: Int = 21587,
-    val useMyShiftTouchFallbackWhenNoClient: Boolean = true,
-    val myShiftUpNormalizedX: Float = 0.92f,
-    val myShiftUpNormalizedY: Float = 0.85f,
-    val myShiftDownNormalizedX: Float = 0.84f,
-    val myShiftDownNormalizedY: Float = 0.85f,
+    val useMyShiftTouchFallbackWhenNoClient: Boolean = false,
     val pinnedRightPodMac: String? = null,
-    val pinnedLeftPodMac: String? = null,
-    val customBindings: Map<ModeButtonBindingKey, MappedTargetAction> = emptyMap()
+    val pinnedLeftPodMac: String? = null
 )
 
 interface ClickBleController {

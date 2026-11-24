@@ -44,6 +44,9 @@ class DesktopZwiftBleController(
     private val _discoveredAddresses = MutableStateFlow<List<String>>(emptyList())
     val discoveredAddresses: StateFlow<List<String>> = _discoveredAddresses.asStateFlow()
 
+    private val _lastWorkerError = MutableStateFlow<String?>(null)
+    val lastWorkerError: StateFlow<String?> = _lastWorkerError.asStateFlow()
+
     val podActiveMasks = ConcurrentHashMap<String, Int>()
     private val lastLoggedPayloadHex = ConcurrentHashMap<String, String>()
 
@@ -53,7 +56,8 @@ class DesktopZwiftBleController(
     private val currentButtonMapLock = Any()
 
     private val gestureEngine = ZwiftGestureEngine(
-        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) }
+        isRepeatEnabled = { button -> PresetStore.isRepeatEnabled(currentConfig, button) },
+        onRepeatReleased = { button -> com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPendingRepeats(button.canonicalButton) }
     ) { event ->
         DiagnosticLogger.info(
             LogCategory.BLE,
@@ -69,16 +73,21 @@ class DesktopZwiftBleController(
     @Volatile private var isRunningBridge = false
 
     fun updateConfiguration(config: AppConfiguration) {
+        val presetChanged = currentConfig.activePresetId != config.activePresetId ||
+            currentConfig.presets != config.presets
         val needsRestart = isRunningBridge && (
-            currentConfig.rightPodOnlyNoZwift != config.rightPodOnlyNoZwift ||
             currentConfig.podAssignment != config.podAssignment ||
             currentConfig.pinnedRightPodMac != config.pinnedRightPodMac ||
             currentConfig.pinnedLeftPodMac != config.pinnedLeftPodMac ||
             currentConfig.leftPodAutoReconnectSec != config.leftPodAutoReconnectSec
         )
         currentConfig = config
+        if (presetChanged) {
+            gestureEngine.reset()
+            com.ankiride.bridge.service.DesktopGenericInputDispatcher.cancelPendingRepeats(null)
+        }
         if (needsRestart) {
-            DiagnosticLogger.info(LogCategory.BLE, "BLE pod configuration changed; restarting BLE worker automatically...")
+            DiagnosticLogger.info(LogCategory.BLE, "BLE controller configuration changed; restarting BLE worker automatically...")
             startScanAndConnect(config)
         }
     }
@@ -88,8 +97,9 @@ class DesktopZwiftBleController(
         disconnect()
 
         isRunningBridge = true
+        _lastWorkerError.value = null
         _connectionState.value = BleConnectionState.SCANNING
-        DiagnosticLogger.info(LogCategory.BLE, "Starting Desktop BLE Controller (1-Pod Default=${config.rightPodOnlyNoZwift})")
+        DiagnosticLogger.info(LogCategory.BLE, "Starting Desktop BLE Controller (mode=${config.podAssignment.name})")
 
         startTicker()
         startBleWorkerProcess(config)
@@ -130,11 +140,17 @@ class DesktopZwiftBleController(
                     val nativeBinary = findNativeWorkerBinary()?.takeIf { supportsSideProtocol(it) }
                     val command: MutableList<String>
 
+                    val podModeArg = when (currentConfig.podAssignment) {
+                        PodAssignment.SINGLE_CONTROLLER -> "single"
+                        PodAssignment.RIGHT_CONTROLLER_ONLY -> "right_only"
+                        PodAssignment.BOTH_CONTROLLERS -> "both"
+                    }
                     if (nativeBinary != null) {
                         DiagnosticLogger.info(LogCategory.BLE, "Spawning standalone native BLE worker binary: ${nativeBinary.absolutePath}")
                         command = mutableListOf(
                             nativeBinary.absolutePath,
-                            "--right-only", (currentConfig.podAssignment == PodAssignment.RIGHT_ANKI_ONLY || (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED && currentConfig.rightPodOnlyNoZwift)).toString()
+                            "--pod-mode", podModeArg,
+                            "--left-reconnect-sec", currentConfig.leftPodAutoReconnectSec.toString()
                         )
                     } else {
                         val scriptFile = extractWorkerScript()
@@ -159,12 +175,10 @@ class DesktopZwiftBleController(
                         command = mutableListOf(
                             pythonCmd,
                             scriptFile.absolutePath,
-                            "--right-only", (currentConfig.podAssignment == PodAssignment.RIGHT_ANKI_ONLY || (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED && currentConfig.rightPodOnlyNoZwift)).toString(),
+                            "--pod-mode", podModeArg,
                             "--left-reconnect-sec", currentConfig.leftPodAutoReconnectSec.toString()
                         )
                     }
-
-                    command.addAll(listOf("--legacy-shared", (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED).toString()))
 
                     if (!currentConfig.pinnedRightPodMac.isNullOrBlank()) {
                         if (isValidMacOrUuid(currentConfig.pinnedRightPodMac)) {
@@ -210,40 +224,31 @@ class DesktopZwiftBleController(
                     val reader = BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8))
                     var line: String? = null
                     while (isActive && reader.readLine().also { line = it } != null) {
+                        if (!isActive) break
                         line?.let { parseWorkerLine(it.trim()) }
                     }
 
                     val exitCode = proc.waitFor()
+                    if (!isActive || !isRunningBridge) break
+
                     podActiveMasks.clear()
                     gestureEngine.reset()
                     synchronized(currentButtonMapLock) { ClickButton.entries.forEach { currentButtonMap[it] = false } }
                     _connectedRightMac.value = null
                     _connectedLeftMac.value = null
                     stderrJob.cancel()
-                    DiagnosticLogger.warn(LogCategory.BLE, "BLE worker process terminated with exitCode=$exitCode")
-
-                    if (!isRunningBridge) {
-                        if (_connectionState.value != BleConnectionState.DISCONNECTED) {
-                            _connectionState.value = BleConnectionState.DISCONNECTED
-                        }
-                        break
-                    } else {
-                        DiagnosticLogger.warn(LogCategory.BLE, "BLE worker exited unexpectedly while bridge is running; reconnecting in 2s...")
-                        _connectionState.value = BleConnectionState.SCANNING
-                        delay(2000L)
-                    }
+                    DiagnosticLogger.warn(LogCategory.BLE, "BLE worker exited unexpectedly (exitCode=$exitCode); reconnecting in 2s")
+                    _connectionState.value = BleConnectionState.SCANNING
+                    delay(2000L)
                 } catch (e: CancellationException) {
                     // Expected on cancel or disconnect
                     break
                 } catch (e: Exception) {
+                    // Destroying a cancelled worker can close its stdout during readLine().
+                    if (!isActive || !isRunningBridge) break
                     DiagnosticLogger.error(LogCategory.BLE, "Exception in BLE worker supervisor: ${e.message}")
-                    if (isRunningBridge) {
-                        _connectionState.value = BleConnectionState.SCANNING
-                        delay(2000L)
-                    } else {
-                        _connectionState.value = BleConnectionState.ERROR
-                        break
-                    }
+                    _connectionState.value = BleConnectionState.SCANNING
+                    delay(2000L)
                 } finally {
                     stderrJob?.cancel()
                     process?.let { p ->
@@ -290,16 +295,19 @@ class DesktopZwiftBleController(
                     }
                     "CONNECTED_RIGHT", "CONNECTED_LEFT" -> {
                         if (mac == null) return
+                        _lastWorkerError.value = null
                         if (stateName == "CONNECTED_RIGHT") _connectedRightMac.value = mac else _connectedLeftMac.value = mac
                         _connectionState.value = if (_connectedRightMac.value != null && _connectedLeftMac.value != null)
                             BleConnectionState.CONNECTED_BOTH_PODS else if (_connectedRightMac.value != null) BleConnectionState.CONNECTED_RIGHT_ONLY else BleConnectionState.CONNECTED_LEFT_ONLY
                     }
                     "CONNECTED_RIGHT_ONLY" -> {
+                        _lastWorkerError.value = null
                         if (mac != null) _connectedRightMac.value = mac
                         _connectionState.value = BleConnectionState.CONNECTED_RIGHT_ONLY
                         DiagnosticLogger.info(LogCategory.BLE, "Connected to Right Pod: $mac")
                     }
                     "CONNECTED_BOTH_PODS" -> {
+                        _lastWorkerError.value = null
                         if (mac != null && _connectedRightMac.value != mac) {
                             _connectedLeftMac.value = mac
                         }
@@ -329,8 +337,10 @@ class DesktopZwiftBleController(
                         }
                     }
                     "ERROR" -> {
+                        val msg = parts.drop(1).joinToString(" ").ifBlank { "Bluetooth worker error" }
+                        _lastWorkerError.value = msg
                         _connectionState.value = BleConnectionState.ERROR
-                        DiagnosticLogger.error(LogCategory.BLE, "BLE worker error: ${parts.drop(1).joinToString(" ")}")
+                        DiagnosticLogger.error(LogCategory.BLE, "BLE worker error: $msg")
                     }
                 }
             }
@@ -374,7 +384,7 @@ class DesktopZwiftBleController(
         val isLeft = _connectedLeftMac.value.equals(mac, ignoreCase = true)
         if (!isRight && !isLeft) return
         var mask = ZwiftPacketParser.parseActiveButtonMask(payload)
-        if (mask != null && currentConfig.podAssignment != PodAssignment.LEGACY_SHARED && payload[0] == ZwiftPacketParser.MSG_CLICK_V1_SHIFT) {
+        if (mask != null && currentConfig.podAssignment != PodAssignment.SINGLE_CONTROLLER && payload[0] == ZwiftPacketParser.MSG_CLICK_V1_SHIFT) {
             mask = when {
                 isLeft && mask == ClickButton.SHIFT_UP_RIGHT.bitmask -> ClickButton.SHIFT_UP_LEFT.bitmask
                 isRight && mask == ClickButton.SHIFT_DOWN_LEFT.bitmask -> ClickButton.SHIFT_DOWN_RIGHT.bitmask
@@ -387,8 +397,8 @@ class DesktopZwiftBleController(
             return
         }
 
-        val allowedMask = ClickButton.entries.filter { it.isRightPod == isRight }.fold(0) { acc, button -> acc or button.bitmask }
-        val sideMask = if (currentConfig.podAssignment == PodAssignment.LEGACY_SHARED) mask else mask and allowedMask
+        val side = if (isRight) PodSelectionPolicy.Side.RIGHT else PodSelectionPolicy.Side.LEFT
+        val sideMask = PodSelectionPolicy.filterMask(mask, side, currentConfig.podAssignment)
         val prevMask = podActiveMasks.put(mac, sideMask) ?: 0
         val hex = payload.joinToString(" ") { "%02X".format(it) }
         if (mask != 0 || prevMask != 0 || lastLoggedPayloadHex.put(mac, hex) != hex) {
@@ -454,6 +464,7 @@ class DesktopZwiftBleController(
         }
         _connectedRightMac.value = null
         _connectedLeftMac.value = null
+        _lastWorkerError.value = null
         _connectionState.value = BleConnectionState.DISCONNECTED
     }
 
@@ -514,7 +525,7 @@ class DesktopZwiftBleController(
             if (!process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
                 false
             } else {
-                process.exitValue() == 0 && process.inputStream.bufferedReader().use { it.readText().trim() } == "CLICKCONTROL_BLE_PROTOCOL_3"
+                process.exitValue() == 0 && process.inputStream.bufferedReader().use { it.readText().trim() } == "CLICKCONTROL_BLE_PROTOCOL_4"
             }
         } catch (_: Exception) {
             false
