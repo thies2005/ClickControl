@@ -317,7 +317,7 @@ class DesktopZwiftBleController(
                     "DISCONNECTED" -> {
                         if (mac != null) {
                             podActiveMasks.remove(mac)
-                            gestureEngine.reset()
+                            gestureEngine.clearDisconnectedButtons(podActiveMasks.values.fold(0) { acc, mask -> acc or mask })
                             if (_connectedRightMac.value.equals(mac, ignoreCase = true)) {
                                 _connectedRightMac.value = null
                             }

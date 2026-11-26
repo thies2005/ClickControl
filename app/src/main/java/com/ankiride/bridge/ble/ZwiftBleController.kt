@@ -229,7 +229,7 @@ class ZwiftBleController(
                 if (gatt != null && !activeGatts.remove(device.address, gatt)) return
                 connectedPods.remove(device.address)
                 podActiveMasks.remove(device.address)
-                gestureEngine.reset()
+                gestureEngine.clearDisconnectedButtons(podActiveMasks.values.fold(0) { acc, mask -> acc or mask })
                 updateConnectionState()
             }
         }

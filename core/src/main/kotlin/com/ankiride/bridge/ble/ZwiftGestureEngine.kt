@@ -30,7 +30,14 @@ class ZwiftGestureEngine @JvmOverloads constructor(
 
     @Synchronized
     fun reset() {
-        trackers.values.forEach { tracker ->
+        clearDisconnectedButtons(remainingMask = 0)
+    }
+
+    @Synchronized
+    fun clearDisconnectedButtons(remainingMask: Int) {
+        trackers.forEach { (button, tracker) ->
+            if ((remainingMask and button.bitmask) != 0) return@forEach
+            if (tracker.repeatModeActive) onRepeatReleased?.invoke(button)
             tracker.isPressed = false
             tracker.longPressTriggered = false
             tracker.repeatModeActive = false

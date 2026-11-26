@@ -11,6 +11,28 @@ import org.junit.Test
 class ZwiftGestureEngineCoreTest {
 
     @Test
+    fun disconnectCancelsOnlyLostButtonsWithoutReplayingHeldButtons() {
+        val events = mutableListOf<ButtonGestureEvent>()
+        val releasedButtons = mutableListOf<ClickButton>()
+        val engine = ZwiftGestureEngine(
+            isRepeatEnabled = { true },
+            onRepeatReleased = { releasedButtons.add(it) }
+        ) { events.add(it) }
+
+        engine.processButtonStates(mapOf(ClickButton.B to true, ClickButton.UP to true), nowMs = 1000L)
+        engine.clearDisconnectedButtons(ClickButton.UP.bitmask)
+        engine.processButtonStates(mapOf(ClickButton.B to false, ClickButton.UP to true), nowMs = 1100L)
+        engine.processButtonStates(mapOf(ClickButton.UP to true), nowMs = 1500L)
+
+        assertEquals(listOf(ClickButton.B), releasedButtons)
+        assertEquals(1, events.count { it.button == ClickButton.UP && !it.isRepeat })
+        assertEquals(1, events.count { it.button == ClickButton.UP && it.isRepeat })
+
+        engine.reset()
+        assertEquals(listOf(ClickButton.B, ClickButton.UP), releasedButtons)
+    }
+
+    @Test
     fun repeatReleaseCallbackFiresAndMarksRepeatTicks() {
         val events = mutableListOf<ButtonGestureEvent>()
         val releasedButtons = mutableListOf<ClickButton>()

@@ -113,7 +113,7 @@ def format_bleak_error(err: Exception) -> str:
     return msg or err.__class__.__name__
 
 
-async def setup_and_handshake(client: BleakClient, mac: str) -> bool:
+async def setup_and_handshake(client: BleakClient, mac: str, is_current=None) -> bool:
     emit_state("HANDSHAKING", mac)
     log("INFO", f"Connected to {mac}. Performing 'RideOn' handshake & characteristic discovery...")
 
@@ -162,6 +162,8 @@ async def setup_and_handshake(client: BleakClient, mac: str) -> bool:
                 break
 
     def notification_handler(sender, data: bytearray):
+        if is_current is not None and not is_current():
+            return
         hex_str = data.hex().upper()
         emit_packet(mac, hex_str)
 
@@ -284,6 +286,16 @@ class ZwiftBleWorker:
     def update_connection_state(self, changed_mac: str = ""):
         pass
 
+    def _forget_client(self, mac, client):
+        if self.active_clients.get(mac) is not client:
+            return
+        del self.active_clients[mac]
+        self.connected_macs.discard(mac)
+        if self.connected_sides.pop(mac, None) == "LEFT":
+            self.left_connected_at = None
+        emit_state("DISCONNECTED", mac)
+        self.update_connection_state(mac)
+
     async def run(self):
         log("INFO", f"Starting Zwift BLE Worker (pod_mode={self.pod_mode}, pinned_right='{self.pinned_right}', pinned_left='{self.pinned_left}')")
         emit_state("SCANNING")
@@ -295,16 +307,13 @@ class ZwiftBleWorker:
                     if left_macs and (time.monotonic() - self.left_connected_at) >= self.left_reconnect_sec:
                         left_mac = left_macs[0]
                         log("INFO", f"Left pod watchdog refreshing {left_mac} after {self.left_reconnect_sec}s")
-                        client = self.active_clients.pop(left_mac, None)
-                        self.connected_macs.discard(left_mac)
-                        self.connected_sides.pop(left_mac, None)
-                        self.left_connected_at = None
+                        client = self.active_clients.get(left_mac)
                         if client is not None:
+                            self._forget_client(left_mac, client)
                             try:
                                 await client.disconnect()
                             except Exception:
                                 pass
-                        emit_state("DISCONNECTED", left_mac)
 
                 if self.pod_mode in ("single", "right_only") and len(self.connected_macs) >= 1:
                     await asyncio.sleep(1.0)
@@ -439,15 +448,14 @@ class ZwiftBleWorker:
         emit_state("CONNECTING", mac)
 
         def on_disconnect(client):
+            if self.active_clients.get(mac) is not client:
+                return
             log("WARN", f"Device disconnected (asleep or out of range): {mac}")
-            self.connected_macs.discard(mac)
-            self.connected_sides.pop(mac, None)
-            self.active_clients.pop(mac, None)
-            emit_state("DISCONNECTED", mac)
-            self.update_connection_state(mac)
+            self._forget_client(mac, client)
 
+        client = None
+        handshaken = False
         try:
-            client = None
             connected = False
             for attempt in range(1, 3):
                 attempt_client = BleakClient(device, disconnected_callback=on_disconnect, timeout=10.0)
@@ -475,19 +483,14 @@ class ZwiftBleWorker:
                 return
 
             self.active_clients[mac] = client
-
-            success = await setup_and_handshake(client, mac)
-            if not success:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                self.active_clients.pop(mac, None)
-                self.connected_macs.discard(mac)
-                emit_state("DISCONNECTED", mac)
-                self.update_connection_state(mac)
+            if not self.running or not await setup_and_handshake(
+                client, mac, lambda: self.running and self.active_clients.get(mac) is client
+            ):
+                return
+            if not self.running or self.active_clients.get(mac) is not client or not client.is_connected:
                 return
 
+            handshaken = True
             self.connected_macs.add(mac)
             self.connected_sides[mac] = side
             if side == "LEFT":
@@ -498,21 +501,26 @@ class ZwiftBleWorker:
 
         except Exception as e:
             log("ERROR", f"Error during connection to {mac}: {e}")
-            self.connected_macs.discard(mac)
-            self.active_clients.pop(mac, None)
-            emit_state("DISCONNECTED", mac)
-            self.update_connection_state(mac)
+            if client is None:
+                emit_state("DISCONNECTED", mac)
+        finally:
+            if client is not None and not handshaken:
+                self._forget_client(mac, client)
+                if client.is_connected:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
 
     async def stop(self):
         self.running = False
         log("INFO", "Stopping BLE worker and disconnecting devices...")
         for mac, client in list(self.active_clients.items()):
+            self._forget_client(mac, client)
             try:
                 await client.disconnect()
             except Exception:
                 pass
-        self.active_clients.clear()
-        self.connected_macs.clear()
         emit_state("DISCONNECTED")
 
 
